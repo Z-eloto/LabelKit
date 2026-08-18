@@ -21,10 +21,10 @@ log_level = "info"
 log_format = "text"
 
 [llm.default]
-provider = "anthropic"
-base_url = "https://api.deepseek.com/anthropic"
-model = "deepseek-v4-flash"
-api_key_env = "LABELKIT_DEEPSEEK_KEY"
+provider = "openai_compatible"
+base_url = "http://113.46.219.251:8080/v1"
+model = "GLM-5.1"
+api_key_env = "LK3"
 max_concurrency = 4
 timeout_s = 120
 max_retries = 5
