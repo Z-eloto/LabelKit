@@ -7,6 +7,13 @@ The frame splitting contract is shared with ``split.py``.  This script writes:
   pasteBoardEvent filtered from the ordered event list;
 * ``all_accessor.json``: every non-empty accessor, ordered by occurrence time;
 * ``accessors/<accessor_type>.csv``: one flattened table per accessor type.
+* when timestamp calibration is enabled, a calibrated copy of the input stream
+  is written to the output directory with the same file name; both the outer
+  ``ts`` and timestamp-bearing fields inside ``text`` use the rebuilt timeline.
+* when timestamp calibration is enabled, a matching intent JSONL (for example
+  ``synth-caffe.jsonl`` beside ``synth-caffe.stream.jsonl``) is copied into the
+  output directory and each ``actionInfo.timestamp`` is synchronized to the
+  calibrated timestamp of its earliest member ``app_usage`` frame.
 
 Run, for example::
 
@@ -16,6 +23,8 @@ Run, for example::
 Add ``--calibrate-timestamps`` to rebuild payload timestamps before splitting.
 By default the calibration gap follows the outer stream ``ts`` intervals; pass
 ``--calibration-gap-ms`` to use one fixed positive gap instead.
+The sibling intent file is discovered automatically from the
+``*.stream.jsonl`` name.  Pass ``--intent-input`` to select it explicitly.
 """
 
 from __future__ import annotations
@@ -98,7 +107,7 @@ class TimestampCalibrator:
     cursor_end_ms: int | None = None
     previous_stream_time: float | None = None
 
-    def calibrate(self, frame: dict[str, Any], line_number: int) -> None:
+    def calibrate(self, frame: dict[str, Any], line_number: int) -> int:
         payload = frame.get("text")
         if not isinstance(payload, dict):
             raise ValueError(f"line {line_number}: field 'text' must be an object")
@@ -120,8 +129,10 @@ class TimestampCalibrator:
 
         duration_ms = self._calibrate_duration(payload, line_number)
         _assign_payload_start(payload, assigned_start_ms, original_start_ms, duration_ms)
+        frame["ts"] = _format_calibrated_stream_time(frame.get("ts"), assigned_start_ms)
         self.cursor_end_ms = assigned_start_ms + (duration_ms or 0)
         self.previous_stream_time = stream_time
+        return assigned_start_ms
 
     def _next_gap_ms(self, stream_time: float | None) -> int:
         if self.fixed_gap_ms is not None:
@@ -186,6 +197,32 @@ def _parse_time(value: Any) -> float | None:
             return None
 
     return None
+
+
+def _format_calibrated_stream_time(original: Any, timestamp_ms: int) -> Any:
+    """Represent a calibrated outer ``ts`` in the source field's time format."""
+    if isinstance(original, str):
+        text = original.strip()
+        try:
+            normalized = text[:-1] + "+00:00" if text.endswith("Z") else text
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return str(timestamp_ms)
+        if parsed.tzinfo is None:
+            calibrated = datetime.fromtimestamp(timestamp_ms / 1000).replace(tzinfo=None)
+        else:
+            calibrated = datetime.fromtimestamp(timestamp_ms / 1000, tz=parsed.tzinfo)
+        return calibrated.isoformat(timespec="microseconds")
+    if isinstance(original, (int, float)) and not isinstance(original, bool):
+        magnitude = abs(float(original))
+        if magnitude >= 1e17:
+            return timestamp_ms * 1_000_000
+        if magnitude >= 1e14:
+            return timestamp_ms * 1_000
+        if magnitude >= 1e11:
+            return timestamp_ms
+        return timestamp_ms / 1000
+    return timestamp_ms
 
 
 def _payload_time(payload: Mapping[str, Any], fallback: float | None) -> float:
@@ -281,6 +318,8 @@ def collect_stream_views(
     input_path: str | Path,
     calibrate_timestamps: bool = False,
     calibration_gap_ms: int | None = None,
+    calibrated_app_usage_times: dict[int, int] | None = None,
+    calibrated_frames: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split every stream frame and return ordered events and accessors."""
     timed_events: list[_TimedValue] = []
@@ -312,7 +351,14 @@ def collect_stream_views(
                 )
 
             if calibrator is not None:
-                calibrator.calibrate(frame, line_number)
+                calibrated_start_ms = calibrator.calibrate(frame, line_number)
+                if (
+                    calibrated_app_usage_times is not None
+                    and frame["text"].get("dataName") == "appUsageEvent"
+                ):
+                    calibrated_app_usage_times[line_number] = calibrated_start_ms
+                if calibrated_frames is not None:
+                    calibrated_frames.append(frame)
 
             split = split_frame(frame, FRAME_SPLIT_RULES)
             stream_time = _parse_time(frame.get("ts"))
@@ -355,6 +401,131 @@ def collect_stream_views(
         [item.value for item in timed_events],
         [item.value for item in timed_accessors],
     )
+
+
+def _default_intent_input(stream_path: str | Path) -> Path | None:
+    """Return the conventional intent artifact beside a ``*.stream.jsonl``."""
+    path = Path(stream_path)
+    suffix = ".stream.jsonl"
+    if not path.name.endswith(suffix):
+        return None
+    return path.with_name(path.name[:-len(suffix)] + ".jsonl")
+
+
+def write_calibrated_stream(
+    frames: Sequence[Mapping[str, Any]],
+    output_path: str | Path,
+) -> Path:
+    """Write a complete calibrated stream copy as compact UTF-8 JSONL."""
+    destination = Path(output_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("w", encoding="utf-8", newline="\n") as output_file:
+        for frame in frames:
+            output_file.write(json.dumps(frame, ensure_ascii=False, separators=(",", ":")))
+            output_file.write("\n")
+    return destination
+
+
+def _source_basename(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    return value.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def synchronize_intent_timestamps(
+    intent_input: str | Path,
+    intent_output: str | Path,
+    stream_input: str | Path,
+    calibrated_app_usage_times: Mapping[int, int],
+) -> int:
+    """Copy intent JSONL while replacing each intent's app-usage timestamp.
+
+    ``_meta.stream.member_sources`` is the stable join between an intent row
+    and the stream rows that formed it.  An intent that declares
+    ``actionInfo.timestamp`` must contain at least one member line recorded as
+    a calibrated ``appUsageEvent``; multiple matches use the earliest
+    calibrated start, matching the caffe annotation contract.  Intents without
+    that slot are copied unchanged.
+    The complete destination is validated in memory before it is written, so a
+    mapping error cannot leave a partially synchronized file behind.
+    """
+    source_path = Path(intent_input)
+    destination_path = Path(intent_output)
+    stream_name = Path(stream_input).name
+    if not source_path.is_file():
+        raise FileNotFoundError(f"intent annotation file does not exist: {source_path}")
+    if source_path.resolve() == destination_path.resolve():
+        raise ValueError(
+            "intent output would overwrite its source; choose a different output directory"
+        )
+
+    synchronized_rows: list[dict[str, Any]] = []
+    updated_count = 0
+    with source_path.open("r", encoding="utf-8") as intent_file:
+        for line_number, line in enumerate(intent_file, start=1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"{source_path}:{line_number}: invalid JSON: {exc.msg}"
+                ) from exc
+            if not isinstance(row, dict):
+                raise ValueError(
+                    f"{source_path}:{line_number}: each JSONL row must be an object"
+                )
+
+            action_info = row.get("actionInfo")
+            if not isinstance(action_info, dict):
+                raise ValueError(
+                    f"{source_path}:{line_number}: field 'actionInfo' must be an object"
+                )
+            # Some scenarios (for example check_in) have no intent timestamp.
+            # Copy those rows byte-semantically without inventing an undeclared slot.
+            if "timestamp" not in action_info:
+                synchronized_rows.append(row)
+                continue
+
+            meta = row.get("_meta")
+            stream_meta = meta.get("stream") if isinstance(meta, Mapping) else None
+            member_sources = (
+                stream_meta.get("member_sources")
+                if isinstance(stream_meta, Mapping)
+                else None
+            )
+            if not isinstance(member_sources, list):
+                raise ValueError(
+                    f"{source_path}:{line_number}: missing _meta.stream.member_sources"
+                )
+
+            matched_times: list[int] = []
+            for member in member_sources:
+                if not isinstance(member, Mapping):
+                    continue
+                if _source_basename(member.get("file")) != stream_name:
+                    continue
+                member_line = member.get("line_no")
+                if isinstance(member_line, int) and not isinstance(member_line, bool):
+                    timestamp = calibrated_app_usage_times.get(member_line)
+                    if timestamp is not None:
+                        matched_times.append(timestamp)
+
+            if not matched_times:
+                raise ValueError(
+                    f"{source_path}:{line_number}: intent has no calibrated app_usage "
+                    f"member from {stream_name}"
+                )
+            action_info["timestamp"] = min(matched_times)
+            updated_count += 1
+            synchronized_rows.append(row)
+
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    with destination_path.open("w", encoding="utf-8", newline="\n") as output_file:
+        for row in synchronized_rows:
+            output_file.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+            output_file.write("\n")
+    return updated_count
 
 
 def _flatten_object(
@@ -507,7 +678,7 @@ def _standard_poi_events(event: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def _standard_commute_event(event: Mapping[str, Any]) -> dict[str, Any]:
-    transition_value = event.get("commuteTransition")
+    transition_value = event.get("commuteTransition", event.get("periodType"))
     transition = (
         transition_value.upper()
         if isinstance(transition_value, str)
@@ -566,14 +737,33 @@ def export_stream_views(
     output_dir: str | Path,
     calibrate_timestamps: bool = False,
     calibration_gap_ms: int | None = None,
+    intent_input_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Create all JSON views and accessor CSV files for one stream artifact."""
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+    input_stream_path = Path(input_path)
+    calibrated_stream_output = (
+        output_path / input_stream_path.name if calibrate_timestamps else None
+    )
+    if (
+        calibrated_stream_output is not None
+        and input_stream_path.resolve() == calibrated_stream_output.resolve()
+    ):
+        raise ValueError(
+            "calibrated stream output would overwrite its source; "
+            "choose a different output directory"
+        )
+    calibrated_app_usage_times: dict[int, int] = {}
+    calibrated_frames: list[dict[str, Any]] = []
     events, accessors = collect_stream_views(
         input_path,
         calibrate_timestamps=calibrate_timestamps,
         calibration_gap_ms=calibration_gap_ms,
+        calibrated_app_usage_times=(
+            calibrated_app_usage_times if calibrate_timestamps else None
+        ),
+        calibrated_frames=(calibrated_frames if calibrate_timestamps else None),
     )
     standard_events = build_standard_events(events)
 
@@ -592,11 +782,35 @@ def export_stream_views(
             json.dump(json_values[name], output_file, ensure_ascii=False, indent=2)
 
     csv_outputs = write_accessor_csvs(accessors, output_path / "accessors")
+    if calibrated_stream_output is not None:
+        write_calibrated_stream(calibrated_frames, calibrated_stream_output)
+    intent_source: Path | None = None
+    intent_output: Path | None = None
+    intent_updated_count = 0
+    if calibrate_timestamps:
+        if intent_input_path is not None:
+            intent_source = Path(intent_input_path)
+        else:
+            candidate = _default_intent_input(input_path)
+            if candidate is not None and candidate.is_file():
+                intent_source = candidate
+        if intent_source is not None:
+            intent_output = output_path / intent_source.name
+            intent_updated_count = synchronize_intent_timestamps(
+                intent_source,
+                intent_output,
+                input_path,
+                calibrated_app_usage_times,
+            )
     return {
         "event_count": len(events),
         "standard_event_count": len(standard_events),
         "accessor_count": len(accessors),
         "timestamps_calibrated": calibrate_timestamps,
+        "calibrated_stream_output": calibrated_stream_output,
+        "intent_input": intent_source,
+        "intent_output": intent_output,
+        "intent_updated_count": intent_updated_count,
         "json_outputs": json_outputs,
         "csv_outputs": csv_outputs,
     }
@@ -630,6 +844,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "default gaps are derived from outer stream ts values"
         ),
     )
+    parser.add_argument(
+        "--intent-input",
+        type=Path,
+        help=(
+            "intent annotation JSONL whose actionInfo.timestamp values should "
+            "follow calibrated app_usage frames; with timestamp calibration, "
+            "defaults to the sibling file obtained by removing '.stream'"
+        ),
+    )
     return parser
 
 
@@ -640,14 +863,19 @@ def main() -> int:
         parser.error("--calibration-gap-ms must be greater than 0")
     if args.calibration_gap_ms is not None and not args.calibrate_timestamps:
         parser.error("--calibration-gap-ms requires --calibrate-timestamps")
+    if args.intent_input is not None and not args.calibrate_timestamps:
+        parser.error("--intent-input requires --calibrate-timestamps")
     result = export_stream_views(
         args.input,
         args.output_dir,
         calibrate_timestamps=args.calibrate_timestamps,
         calibration_gap_ms=args.calibration_gap_ms,
+        intent_input_path=args.intent_input,
     )
     calibration_status = "enabled" if result["timestamps_calibrated"] else "disabled"
     print(f"Timestamp calibration: {calibration_status}")
+    if result["calibrated_stream_output"] is not None:
+        print(f"Calibrated stream: {result['calibrated_stream_output']}")
     print(f"Events: {result['event_count']} -> {result['json_outputs']['all_event']}")
     print(
         f"Standard events: {result['standard_event_count']} -> "
@@ -657,6 +885,13 @@ def main() -> int:
         f"Accessors: {result['accessor_count']} -> "
         f"{result['json_outputs']['all_accessor']}"
     )
+    if result["intent_output"] is not None:
+        print(
+            f"Intent annotations: {result['intent_updated_count']} timestamps updated -> "
+            f"{result['intent_output']}"
+        )
+    elif result["timestamps_calibrated"]:
+        print("Intent annotations: skipped (no matching intent JSONL found)")
     for accessor_type, path in result["csv_outputs"].items():
         print(f"Accessor CSV [{accessor_type}]: {path}")
     return 0

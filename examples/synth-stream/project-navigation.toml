@@ -1,0 +1,410 @@
+# project-navigation.toml - 通勤、回家、去公司或其他目的地导航场景
+# 每帧生成 event + accessor 所需的扁平字段，再由 split.py 投影为目标结构。
+schema_version = 1
+
+[run]
+output = "./out/synth-navigation.jsonl"
+modality = "text"
+mode = "generate_only"
+batch_size = 8
+seed = 20260819
+
+[input]
+text_field = "text"
+
+[stream]
+order_by = "meta:ts"
+gap_s = 900
+
+[dedup]
+enabled = true
+
+[generate]
+enabled = true
+llms = ["default"]
+num_per_call = 4
+temperature = 0.9
+
+[generate.stream]
+enabled = true
+sessions = 10
+noise_ratio = 0
+noise_instruction = """
+生成与导航出行无关的干扰输入，例如查看新闻、播放音乐或短暂切换应用。
+长度 5–15 字，内容自然，但不能包含通勤、路线、目的地或导航等关键信息。
+"""
+duplicates = 1
+frame_gap_s = [5, 60]
+ts_start = "2026-01-05T08:00:00+08:00"
+
+# 单一档位覆盖 navigation 场景的全部 7 种帧；每种帧在每个序列中至少出现一次。
+[[generate.stream.tiers]]
+tier_rank = 1
+weight = 1
+frame_classes = [
+  "poi",
+  "commute_period",
+  "companion_memory_info",
+  "screen_memory_info",
+  "app_usage",
+  "public_time_period",
+  "public_workday",
+]
+
+[classify]
+enabled = true
+
+[[classify.classes]]
+name = "navigation"
+description = "用户通勤、回家、去公司或前往其他目的地时发起路线导航"
+
+[class.navigation.generate]
+instruction = """
+生成一段完整、连贯的导航出行序列，覆盖通勤、回家、去公司或前往其他目的地之一。
+每个序列包含 app_usage、POI、通勤阶段、当天工作日与时间语义、同伴记忆和屏幕记忆帧。
+每个序列从导航 App 闭集中选择一个应用：高德地图(com.amap.hmapp)或
+百度地图(com.baidu.hmmap)；所有相关帧的应用与 bundleName 必须一致。
+明确且始终保持同一组出发地、目的地、出行方式和路线偏好；出发地与目的地不能相同。
+通勤方向、POI 类型、时间段和工作日语义必须与路线一致。POI 区间表示用户先进入后离开
+同一地点；startTime 必须小于 endTime。
+"""
+sequences = 10
+len_range = [7, 10]
+
+[class.navigation.annotate]
+instruction = """
+你是导航出行行为标注员。阅读完整序列并抽取：
+- behaviorType：固定为 "navigation"
+- confidence：抽取置信度，0 到 1
+- bundleName：取本次导航所用 app_usage 帧的应用包名，只能是导航 App 闭集之一：
+  高德地图(com.amap.hmapp)或百度地图(com.baidu.hmmap)
+- actionInfo：
+  - originName：出发地点名称，开集非空字符串，例如“青浦万达茂商场”
+  - destinationName：目标地点名称，开集非空字符串，例如“青浦吾悦广场”，不能与出发地相同
+  - travelMode：出行方式，只能是 "driving"、"walking" 或 "transit"
+  - routeChoice：路线偏好，只能是 "fastest" 或 "shortest"
+不要输出未声明字段。
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "behaviorType": {"type": "string", "const": "navigation"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "bundleName": {"type": "string", "enum": ["com.amap.hmapp", "com.baidu.hmmap"], "description": "导航应用包名：高德地图或百度地图；必须与本序列 app_usage 一致"},
+    "actionInfo": {
+      "type": "object",
+      "properties": {
+        "originName": {"type": "string", "minLength": 1, "description": "出发地点名称，开集字符串"},
+        "destinationName": {"type": "string", "minLength": 1, "description": "目标地点名称，开集字符串，不能与 originName 相同"},
+        "travelMode": {"type": "string", "enum": ["driving", "walking", "transit"], "description": "出行方式"},
+        "routeChoice": {"type": "string", "enum": ["fastest", "shortest"], "description": "路线偏好：最快或最短"}
+      },
+      "required": ["originName", "destinationName", "travelMode", "routeChoice"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["behaviorType", "confidence", "bundleName", "actionInfo"],
+  "additionalProperties": false
+}
+"""
+
+# ── 帧类表 ────────────────────────────────────────────────────────────────
+
+[[frame.classify.classes]]
+name = "poi"
+description = "用户进入并离开一个地点的完整区间，拆成一一对应的 IN/OUT 事件"
+
+[[frame.classify.classes]]
+name = "commute_period"
+description = "通勤阶段：离家、到公司、离开公司或到家"
+
+[[frame.classify.classes]]
+name = "companion_memory_info"
+description = "最近30分钟的同伴记忆截图分析"
+
+[[frame.classify.classes]]
+name = "screen_memory_info"
+description = "最近30分钟的屏幕记忆截图分析"
+
+[[frame.classify.classes]]
+name = "app_usage"
+description = "最近30分钟的高德地图或百度地图导航App使用区间"
+
+[[frame.classify.classes]]
+name = "public_time_period"
+description = "当前时间在一天中的公共时段"
+
+[[frame.classify.classes]]
+name = "public_workday"
+description = "当天是公共工作日或公共假日"
+
+# ── POI：一帧机械拆为 IN/OUT 两个 poiEvent + 一个 poiToday accessor ───────
+
+[frame.class.poi.generate]
+instruction = """
+产出一个完整的地点停留区间。字段说明：
+- dataName：当前规范化帧名，固定为 "poiEvent"；示例源数据中的 "Poi" 不直接写入该字段
+- poiType：RESTAURANT、HOME、COMPANY、SHOPPING_CENTER、RAILWAY_STATION、PARK、
+  HOSPITAL_CLINIC、RESEARCH_INSTITUTE、BUSINESS_PARK、STADIUM 或 HOTEL_MOTEL；
+  对应示例源字段 dataType，例如 SHOPPING_CENTER
+- poiName：地点名称，取值为开集字符串，并与 poiType 保持语义一致。以下仅为取值样例，
+  可以生成不在样例中的其他真实、自然地点名称：
+  大沙河公园、华为坂田基地、深圳华为坂田基地D区、深圳北站、深圳北站-东广场、
+  留仙居、湄洲岛国家旅游度假区-妈祖庙、妈祖影视城、湄洲岛国家旅游度假区、
+  鹅尾海蚀地质公园、莆田站、清晖园、中环大厦、中环大厦(清晖路)、逢简村、
+  大梅沙海滨公园、大梅沙海滨公园大梅沙海滩、大梅沙海滩、塘朗山公园、
+  梅林水库绿道涂鸦墙、塘朗山公园-塘朗山顶峰。该字段对应示例源字段 column1，
+  例如 SHOPPING_CENTER 类型可使用“深业上城”
+- longitude：地点经度，-180 到 180；对应示例源字段 column5，例如 114.068452319516
+- latitude：地点纬度，-90 到 90；对应示例源字段 column4，例如 22.5559039164328
+- startTime：进入地点的13位毫秒时间戳，对应示例源字段 inTimestamp
+- endTime：离开地点的13位毫秒时间戳，对应示例源字段 outTimestamp，必须晚于 startTime
+- duration：当前帧使用毫秒，必须等于 endTime - startTime 且不能为0；示例源字段
+  residenceTimeInSeconds 表示同一停留时长，但单位为秒
+后处理将 startTime 生成 state=IN 的 poiEvent，将 endTime 生成 state=OUT 的 poiEvent，
+并把 poiType/startTime/endTime 写入 poiToday 数组。
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "poiEvent", "description": "规范化帧名；源数据中的 dataName=Poi 不直接沿用"},
+    "poiType": {"type": "string", "enum": ["RESTAURANT", "HOME", "COMPANY", "SHOPPING_CENTER", "RAILWAY_STATION", "PARK", "HOSPITAL_CLINIC", "RESEARCH_INSTITUTE", "BUSINESS_PARK", "STADIUM", "HOTEL_MOTEL"], "description": "地点类别，对应示例源字段 dataType"},
+    "poiName": {"type": "string", "minLength": 1, "description": "开集地点名称，对应示例源字段 column1；生成提示中的地点仅为样例"},
+    "longitude": {"type": "number", "minimum": -180, "maximum": 180, "description": "地点经度，对应示例源字段 column5"},
+    "latitude": {"type": "number", "minimum": -90, "maximum": 90, "description": "地点纬度，对应示例源字段 column4"},
+    "startTime": {"type": "integer", "description": "进入地点的13位毫秒时间戳，对应 inTimestamp"},
+    "endTime": {"type": "integer", "description": "离开地点的13位毫秒时间戳，对应 outTimestamp，必须晚于 startTime"},
+    "duration": {"type": "integer", "minimum": 1000, "description": "停留时长（毫秒），等于 endTime-startTime；源 residenceTimeInSeconds 使用秒"}
+  },
+  "required": ["dataName", "poiType", "poiName", "longitude", "latitude", "startTime", "endTime", "duration"],
+  "additionalProperties": false
+}
+"""
+
+# ── Commute Period ────────────────────────────────────────────────────────
+
+[frame.class.commute_period.generate]
+instruction = """
+产出通勤感知事件：
+- dataName：当前规范化帧名，固定为 "commutePeriodEvent"；示例源数据中的
+  GoToWorkCommute/GetOffWorkCommute 用于判断通勤方向，不直接写入该字段
+- timestamp：事件发生时间，13位毫秒时间戳。离开类事件使用源 inTimestamp，
+  到达类事件使用源 outTimestamp
+- periodType：LEAVE_HOME、ARRIVE_COMPANY、LEAVE_COMPANY 或 ARRIVE_HOME。
+  GoToWorkCommute 的 inTimestamp/outTimestamp 分别对应 LEAVE_HOME/ARRIVE_COMPANY；
+  GetOffWorkCommute 的 inTimestamp/outTimestamp 分别对应 LEAVE_COMPANY/ARRIVE_HOME
+示例中的 residenceTimeInSeconds 是整个通勤区间时长，当前事件帧不保留该字段。
+该值同时作为 accessor commutePeriod 的字符串值。
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "commutePeriodEvent", "description": "规范化帧名；源 GoToWorkCommute/GetOffWorkCommute 仅用于判断方向"},
+    "timestamp": {"type": "integer", "description": "13位毫秒事件时间；离开事件对应源 inTimestamp，到达事件对应源 outTimestamp"},
+    "periodType": {"type": "string", "enum": ["LEAVE_HOME", "ARRIVE_COMPANY", "LEAVE_COMPANY", "ARRIVE_HOME"], "description": "通勤状态转换；上班为 LEAVE_HOME/ARRIVE_COMPANY，下班为 LEAVE_COMPANY/ARRIVE_HOME"}
+  },
+  "required": ["dataName", "timestamp", "periodType"],
+  "additionalProperties": false
+}
+"""
+
+# ── Companion Memory Info ─────────────────────────────────────────────────
+
+[frame.class.companion_memory_info.generate]
+instruction = """
+产出同伴记忆快照帧：
+- dataName：固定为 "companionMemoryEvent"
+- createTime：截图创建时间，13位毫秒时间戳；拆分为 accessor.timestamp
+- updateTime：分析完成时间，13位毫秒时间戳，不能早于 createTime
+- entityId：实体ID
+- pageId：页面ID
+- caption：与本次导航的出发地、目的地、路线规划或行程状态有关的截图内容摘要
+- bundleName：只能是高德地图(com.amap.hmapp)或百度地图(com.baidu.hmmap)，
+  并与本序列 app_usage 的 bundleName 一致
+- status：Init 或 Finish
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "companionMemoryEvent"},
+    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "entityId": {"type": "string"},
+    "pageId": {"type": "string"},
+    "caption": {"type": "string"},
+    "bundleName": {"type": "string", "enum": ["com.amap.hmapp", "com.baidu.hmmap"], "description": "导航应用包名，必须与本序列 app_usage 一致"},
+    "status": {"type": "string", "enum": ["Init", "Finish"]}
+  },
+  "required": ["dataName", "createTime", "updateTime", "entityId", "pageId", "caption", "bundleName", "status"],
+  "additionalProperties": false
+}
+"""
+
+# ── Screen Memory Info ────────────────────────────────────────────────────
+
+[frame.class.screen_memory_info.generate]
+instruction = """
+产出屏幕记忆快照帧：
+- dataName：固定为 "screenMemoryEvent"
+- createTime：截图创建时间，13位毫秒时间戳；拆分为 accessor.timestamp
+- updateTime：分析完成时间，13位毫秒时间戳，不能早于 createTime
+- entityId：实体ID
+- pageId：页面ID
+- caption：所选导航 App 的路线规划、导航中或到达页面内容摘要，地点与本序列路线一致
+- bundleName：只能是高德地图(com.amap.hmapp)或百度地图(com.baidu.hmmap)，
+  并与本序列 app_usage 的 bundleName 一致
+- status：Init 或 Finish
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "screenMemoryEvent"},
+    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "entityId": {"type": "string"},
+    "pageId": {"type": "string"},
+    "caption": {"type": "string"},
+    "bundleName": {"type": "string", "enum": ["com.amap.hmapp", "com.baidu.hmmap"], "description": "导航应用包名，必须与本序列 app_usage 一致"},
+    "status": {"type": "string", "enum": ["Init", "Finish"]}
+  },
+  "required": ["dataName", "createTime", "updateTime", "entityId", "pageId", "caption", "bundleName", "status"],
+  "additionalProperties": false
+}
+"""
+
+# ── App Usage：字段结构与 caffe 保持一致 ─────────────────────────────────
+
+[frame.class.app_usage.generate]
+instruction = """
+产出导航 App 使用区间帧：
+- dataName：固定为 "appUsageEvent"
+- timestamp：13位毫秒时间戳
+- bundleName：只能从导航 App 闭集中选择：高德地图(com.amap.hmapp)或
+  百度地图(com.baidu.hmmap)，并与本序列其他应用相关帧保持一致
+- state：IN 或 OUT
+- startTime：App使用开始时间，13位毫秒时间戳
+- duration：使用时长（毫秒），不能为0
+后处理将 startTime/duration 机械拆为一对 IN/OUT appUsageEvent。
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "appUsageEvent"},
+    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "bundleName": {"type": "string", "enum": ["com.amap.hmapp", "com.baidu.hmmap"], "description": "导航应用包名：高德地图或百度地图"},
+    "state": {"type": "string", "enum": ["IN", "OUT"]},
+    "startTime": {"type": "integer"},
+    "duration": {"type": "integer", "minimum": 1000}
+  },
+  "required": ["dataName", "timestamp", "bundleName", "state", "startTime", "duration"],
+  "additionalProperties": false
+}
+"""
+
+# ── Public Time Period ────────────────────────────────────────────────────
+
+[frame.class.public_time_period.generate]
+instruction = """
+产出公共时段事件：
+- dataName：当前规范化帧名，固定为 "publicTimePeriodEvent"
+- timestamp：事件或状态观测时间，13位毫秒时间戳，对应示例表格外层 timestamp
+- publicTimePeriodType：根据 timestamp 选择 MIDNIGHT（0-6）、MORNING（6-8）、
+  FORENOON（8-12）、NOON（12-14）、AFTERNOON（14-18）或 NIGHT（18-24）；
+  对应示例 Time_PublicTimePeriod 数组元素的 publicTimePeriodType。示例中的 state
+  不属于当前帧字段，不要输出
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "publicTimePeriodEvent", "description": "规范化公共时段事件名"},
+    "timestamp": {"type": "integer", "description": "13位毫秒事件或状态观测时间，对应示例外层 timestamp"},
+    "publicTimePeriodType": {"type": "string", "enum": ["MIDNIGHT", "MORNING", "FORENOON", "NOON", "AFTERNOON", "NIGHT"], "description": "一天中的公共时段，对应源 Time_PublicTimePeriod[].publicTimePeriodType"}
+  },
+  "required": ["dataName", "timestamp", "publicTimePeriodType"],
+  "additionalProperties": false
+}
+"""
+
+# ── Public Work Day ───────────────────────────────────────────────────────
+
+[frame.class.public_workday.generate]
+instruction = """
+产出公共工作日事件：
+- dataName：当前规范化帧名，固定为 "publicWorkDayEvent"
+- timestamp：状态开始生效的13位毫秒时间戳；对应示例 Time_PublicWorkDay 数组元素的
+  inTimestamp。外层 timestamp 是整条聚合记录的观测时间，不替代状态生效时间
+- publicWorkDayType：PUBLIC_WORKDAY 或 PUBLIC_HOLIDAY，对应示例
+  Time_PublicWorkDay 数组元素的 publicWorkDayType。示例中的 state 不属于当前帧字段
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "publicWorkDayEvent", "description": "规范化公共工作日事件名"},
+    "timestamp": {"type": "integer", "description": "公共工作日状态开始生效的13位毫秒时间戳，对应源 Time_PublicWorkDay[].inTimestamp"},
+    "publicWorkDayType": {"type": "string", "enum": ["PUBLIC_WORKDAY", "PUBLIC_HOLIDAY"], "description": "公共工作日类型，对应源 Time_PublicWorkDay[].publicWorkDayType"}
+  },
+  "required": ["dataName", "timestamp", "publicWorkDayType"],
+  "additionalProperties": false
+}
+"""
+
+[quality]
+enabled = true
+mode = "pointwise"
+llm = "default"
+threshold = 0.3
+
+[annotate]
+enabled = true
+llm = "default"
+instruction = """
+你是导航出行行为标注员。抽取 behaviorType、confidence、bundleName 和 actionInfo。
+behaviorType 固定为 "navigation"。bundleName 必须取本序列导航 app_usage 使用的包名，
+只能是高德地图(com.amap.hmapp)或百度地图(com.baidu.hmmap)。
+actionInfo 仅包含 originName、destinationName、travelMode 和 routeChoice；出发地与目的地
+必须来自同一条导航路线且不能相同，出行方式和路线偏好必须使用声明的枚举值。
+"""
+
+[verify]
+enabled = false
+
+[output]
+meta_mode = "inline"
+rejects = "refs"
+schema_inline = """
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "behaviorType": {"type": "string", "const": "navigation"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "bundleName": {"type": "string", "enum": ["com.amap.hmapp", "com.baidu.hmmap"], "description": "导航应用包名，必须与本序列 app_usage 一致"},
+    "actionInfo": {
+      "type": "object",
+      "properties": {
+        "originName": {"type": "string", "minLength": 1, "description": "出发地点名称，开集字符串"},
+        "destinationName": {"type": "string", "minLength": 1, "description": "目标地点名称，开集字符串，不能与 originName 相同"},
+        "travelMode": {"type": "string", "enum": ["driving", "walking", "transit"], "description": "出行方式"},
+        "routeChoice": {"type": "string", "enum": ["fastest", "shortest"], "description": "路线偏好：最快或最短"}
+      },
+      "required": ["originName", "destinationName", "travelMode", "routeChoice"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["behaviorType", "confidence", "bundleName", "actionInfo"],
+  "additionalProperties": false
+}
+"""
+
+[trace]
+enabled = true
+channels = ["schema", "llm"]
+content = "refs"

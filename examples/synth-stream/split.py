@@ -4,6 +4,17 @@ from typing import Dict, List, Any, Optional, Union
 from copy import deepcopy
 
 FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
+    "poiEvent": {
+        "event1": ['dataName', 'poiType', 'poiName', 'longitude', 'latitude',
+                   'state', 'timestamp'],
+        "event2": ['dataName', 'poiType', 'poiName', 'longitude', 'latitude',
+                   'state', 'timestamp'],
+        "accessor": {
+            "type": "array",
+            "key": "poiToday",
+            "fields": ['poiType', 'startTime', 'endTime']
+        }
+    },
     "notificationEvent": {
         "event1": ['dataName', 'messageTime', 'content', 'appName', 'bundleName'],
         "event2": [],
@@ -12,6 +23,14 @@ FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
             "key": "notifications10min",
             "fields": ['timestamp', 'content', 'source'],
             "field_map": {"source": "bundleName"}
+        },
+        "accessor_by_sequence_class": {
+            "check_in": {
+                "type": "array",
+                "key": "notifications10min",
+                "fields": ['timestamp', 'content', 'source'],
+                "field_map": {"source": "bundleName"}
+            }
         }
     },
     "appUsageEvent": {
@@ -21,6 +40,18 @@ FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "key": "appUsage30min",
             "fields": ['bundleName', 'startTime', 'duration']
+        },
+        "accessor_by_sequence_class": {
+            "check_in": {
+                "type": "array",
+                "key": "appUsage30min",
+                "fields": ['bundleName', 'startTime', 'duration']
+            },
+            "navigation": {
+                "type": "array",
+                "key": "appUsage30min",
+                "fields": ['bundleName', 'startTime', 'duration']
+            }
         }
     },
     "companionMemoryEvent": {
@@ -30,6 +61,20 @@ FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "key": "companionMemoryInfo30min",
             "fields": ['createTime', 'entityId', 'pageId', 'caption', 'bundleName', 'status']
+        },
+        "accessor_by_sequence_class": {
+            "check_in": {
+                "type": "array",
+                "key": "companionMemoryInfo30min",
+                "fields": ['timestamp', 'entityId', 'pageId', 'caption', 'bundleName', 'status'],
+                "field_map": {"timestamp": "createTime"}
+            },
+            "navigation": {
+                "type": "array",
+                "key": "companionMemoryInfo30min",
+                "fields": ['timestamp', 'entityId', 'pageId', 'caption', 'bundleName', 'status'],
+                "field_map": {"timestamp": "createTime"}
+            }
         }
     },
     "screenMemoryEvent": {
@@ -39,6 +84,20 @@ FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
             "type": "object",
             "key": "screenMemoryInfo30min",
             "fields": ['createTime', 'entityId', 'pageId', 'caption', 'bundleName', 'status']
+        },
+        "accessor_by_sequence_class": {
+            "check_in": {
+                "type": "array",
+                "key": "screenMemoryInfo30min",
+                "fields": ['timestamp', 'entityId', 'pageId', 'caption', 'bundleName', 'status'],
+                "field_map": {"timestamp": "createTime"}
+            },
+            "navigation": {
+                "type": "array",
+                "key": "screenMemoryInfo30min",
+                "fields": ['timestamp', 'entityId', 'pageId', 'caption', 'bundleName', 'status'],
+                "field_map": {"timestamp": "createTime"}
+            }
         }
     },
     "pasteBoardEvent": {
@@ -50,15 +109,74 @@ FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
             "fields": ['timestamp', 'content', 'source'],
             "field_map": {"source": "sourceApp"}
         }
+    },
+    "commutePeriodEvent": {
+        "event1": ['dataName', 'timestamp', 'periodType'],
+        "event2": [],
+        "accessor": {
+            "type": "scalar",
+            "key": "commutePeriod",
+            "source_field": "periodType"
+        }
+    },
+    "publicTimePeriodEvent": {
+        "event1": ['dataName', 'timestamp', 'publicTimePeriodType'],
+        "event2": [],
+        "accessor": {
+            "type": "object",
+            "key": "publicTimePeriod",
+            "fields": ['publicTimePeriodType']
+        }
+    },
+    "publicWorkDayEvent": {
+        "event1": ['dataName', 'timestamp', 'publicWorkDayType'],
+        "event2": [],
+        "accessor": {
+            "type": "object",
+            "key": "publicWorkDay",
+            "fields": ['publicWorkDayType']
+        }
+    },
+    "weekEvent": {
+        "event1": ['dataName', 'timestamp', 'weekType'],
+        "event2": [],
+        "accessor": {
+            "type": "object",
+            "key": "week",
+            "fields": ['weekType']
+        }
+    },
+    "companionSummaryEvent": {
+        "event1": [],
+        "event2": [],
+        "accessor": {
+            "type": "object",
+            "key": "companionSummary",
+            "fields": ['content']
+        }
+    },
+    "userProfileEvent": {
+        "event1": [],
+        "event2": [],
+        "accessor": {
+            "type": "object",
+            "key": "userProfile",
+            "fields": ['character', 'user.md']
+        }
     }
 }
 
 EVENT_TIMESTAMP_FIELDS: Dict[str, str] = {
+    "poiEvent": "timestamp",
     "notificationEvent": "messageTime",
     "appUsageEvent": "timestamp",
     "companionMemoryEvent": "createTime",
     "screenMemoryEvent": "createTime",
     "pasteBoardEvent": "timestamp",
+    "commutePeriodEvent": "timestamp",
+    "publicTimePeriodEvent": "timestamp",
+    "publicWorkDayEvent": "timestamp",
+    "weekEvent": "timestamp",
 }
 
 def split_frame(frame: Dict[str, Any], rules: Dict[str, Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -80,6 +198,12 @@ def split_frame(frame: Dict[str, Any], rules: Dict[str, Dict[str, Any]] = None) 
     event1_fields = rule.get("event1", [])
     event2_fields = rule.get("event2", [])
     accessor_config = rule.get("accessor", {"type": "object", "fields": []})
+    truth = frame.get("truth")
+    sequence_class = truth.get("sequence_class") if isinstance(truth, dict) else None
+    accessor_config = rule.get("accessor_by_sequence_class", {}).get(
+        sequence_class,
+        accessor_config,
+    )
 
     event1 = {k: data.get(k) for k in event1_fields if k in data}
     event2 = {k: data.get(k) for k in event2_fields if k in data}
@@ -100,6 +224,25 @@ def split_frame(frame: Dict[str, Any], rules: Dict[str, Dict[str, Any]] = None) 
             "bundleName": data.get("bundleName"),
             "state": "OUT",
             "timestamp": start_time + duration
+        }
+
+    if data_name == "poiEvent":
+        common = {
+            "dataName": "poiEvent",
+            "poiType": data.get("poiType"),
+            "poiName": data.get("poiName"),
+            "longitude": data.get("longitude"),
+            "latitude": data.get("latitude"),
+        }
+        event1 = {
+            **common,
+            "state": "IN",
+            "timestamp": data.get("startTime"),
+        }
+        event2 = {
+            **common,
+            "state": "OUT",
+            "timestamp": data.get("endTime"),
         }
 
     result = {
@@ -130,6 +273,12 @@ def _build_accessor(data: Dict[str, Any], accessor_config: Dict[str, Any]) -> An
     elif accessor_type == "array":
         key = accessor_config.get("key", "unknown")
         return {key: [item]}
+
+    elif accessor_type == "scalar":
+        key = accessor_config.get("key")
+        source_field = accessor_config.get("source_field")
+        if key and source_field:
+            return {key: data.get(source_field)}
 
     return {}
 

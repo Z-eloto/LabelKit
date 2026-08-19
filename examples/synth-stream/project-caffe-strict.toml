@@ -1,0 +1,305 @@
+# project-caffe-strict.toml - 买咖啡场景时间流生成（强制 app_usage）
+# 每帧包含 event + accessor 的所有字段（扁平结构），后处理可按规则拆分
+# event/accessor 严格递增需在导出时启用 export_stream_views.py --calibrate-timestamps。
+schema_version = 1
+
+[run]
+output = "./out/synth-caffe-strict.jsonl"
+modality = "text"
+mode = "generate_only"
+batch_size = 8
+seed = 20260814
+
+[input]
+text_field = "text"
+
+[stream]
+order_by = "meta:ts"
+gap_s = 900
+
+[dedup]
+enabled = true
+
+[generate]
+enabled = true
+llms = ["default"]
+num_per_call = 4
+temperature = 0.9
+
+[generate.stream]
+enabled = true
+sessions = 10
+noise_ratio = 0
+noise_instruction = """
+生成与咖啡点单无关的干扰输入：用户随手滑动屏幕、看一下天气或时间等无目的操作，
+长度 5–15 字，如"看一下天气"、"随便刷刷"等。
+"""
+duplicates = 1
+frame_gap_s = [5, 60]
+ts_start = "2026-01-05T09:00:00+08:00"
+
+# 单一档位覆盖全部帧类；tier 构成中的每一种帧在每个序列里至少出现一次，
+# 因而 app_usage 必然存在。档位包含 5 种帧，所以序列长度下限必须至少为 5。
+[[generate.stream.tiers]]
+tier_rank = 1
+weight = 1
+frame_classes = [
+  "notification",
+  "paste_board",
+  "companion_memory",
+  "screen_memory",
+  "app_usage",
+]
+
+[classify]
+enabled = true
+
+[[classify.classes]]
+name = "coffee_order"
+description = "点买咖啡类会话：用户通过手机操作完成咖啡点单的全流程"
+
+[class.coffee_order.generate]
+instruction = """
+你为用户买咖啡场景的**屏幕操作快照序列**建模。每个快照是一帧，
+包含用户在同一时刻的**通知、剪贴板、屏幕记忆、app使用**等信息。
+序列围绕**同一次完整点咖啡流程**展开：
+从用户收到取餐通知开始（或主动打开咖啡app），到浏览菜单、
+选择咖啡规格、确认订单、支付、最后收到取餐完成通知。
+要求每个快照口语化、中文，描述用户的操作意图，
+前后帧之间信息连贯且有推进（不得跳跃太大）。
+"""
+sequences = 10
+len_range = [5, 6]
+
+[class.coffee_order.annotate]
+instruction = """
+你是咖啡点单会话的标注员。阅读整段快照序列，抽取这次点咖啡的意图信息：
+- behaviorType：行为分类，固定为"coffee_ordering"
+- confidence：抽取置信度（0-1）
+- bundleName：使用的app包名
+- actionInfo：槽位信息
+  - brandName：咖啡品牌/门店名（如"瑞幸咖啡"、"星巴克"）
+  - items：咖啡品名数组（如["拿铁"]、["冰美式", "拿铁"]）
+  - fulfillmentMode：履约方式，"delivery"（配送）或"pickup"（自提取餐）
+  - timestamp：与本次点咖啡行为对应的 app_usage 帧的 timestamp（13位毫秒时间戳）；如果序列中存在多个 app_usage 帧，取 timestamp 最早的一个
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "behaviorType": {"type": "string", "const": "coffee_ordering"},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "bundleName": {"type": "string"},
+    "actionInfo": {
+      "type": "object",
+      "properties": {
+        "brandName": {"type": "string"},
+        "items": {"type": "array", "items": {"type": "string"}},
+        "fulfillmentMode": {"type": "string", "enum": ["delivery", "pickup"]},
+        "timestamp": {"type": "integer", "description": "对应 app_usage 帧的13位毫秒时间戳；存在多个时取最早值"}
+      },
+      "required": ["brandName", "items", "fulfillmentMode", "timestamp"]
+    }
+  },
+  "required": ["behaviorType", "confidence", "bundleName", "actionInfo"],
+  "additionalProperties": false
+}
+"""
+
+# ── 帧类表：5类数据，对应5种快照类型 ────────────────────────────────────────
+[[frame.classify.classes]]
+name = "notification"
+description = "通知快照：收到推送通知，如取餐提醒、优惠信息等"
+
+[[frame.classify.classes]]
+name = "paste_board"
+description = "剪贴板快照：用户复制了优惠码或地址等"
+
+[[frame.classify.classes]]
+name = "companion_memory"
+description = "同伴记忆快照：屏幕截图分析结果，app界面描述"
+
+[[frame.classify.classes]]
+name = "screen_memory"
+description = "屏幕记忆快照：另一视角的屏幕截图分析"
+
+[[frame.classify.classes]]
+name = "app_usage"
+description = "App使用快照：用户开始或结束使用某个app"
+
+# ── 按帧类的内容契约 ────────────────────────────────────────────────────────
+# 每类帧包含 event + accessor 的所有字段（扁平结构）
+
+[frame.class.notification.generate]
+instruction = """
+产出通知快照帧：生成通知推送记录。
+字段说明：
+- dataName: 固定为 "notificationEvent"
+- messageTime: 13位毫秒时间戳
+- content: 通知内容摘要（口语化，如"星巴克取餐提醒：您的咖啡已制作完成"）
+- appName: app名称（如"星巴克"、"美团"）
+- bundleName: app包名，可选值：com.sankuai.hmeituan（美团）、com.meituan.takeaway（美团外卖）、me.ele.eleme（饿了么）、com.yumc.kfc.superapp（肯德基）、com.mcdonalds.cma.hm（麦当劳）、com.lucky.luckincoffee（瑞幸）、com.starbuckschina.mystarbucksmoments（星巴克）、com.cotticoffee.cotticlient.happ（库迪）
+- timestamp: 毫秒时间戳（与messageTime保持一致）
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "notificationEvent"},
+    "messageTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "content": {"type": "string"},
+    "appName": {"type": "string"},
+    "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ"]},
+    "timestamp": {"type": "integer"}
+  },
+  "required": ["dataName", "messageTime", "content", "appName", "bundleName", "timestamp"],
+  "additionalProperties": false
+}
+"""
+
+[frame.class.paste_board.generate]
+instruction = """
+产出剪贴板快照帧：生成复制/剪切/粘贴记录。
+字段说明：
+- dataName: 固定为 "pasteBoardEvent"
+- timestamp: 13位毫秒时间戳
+- content: 复制的内容（如"星巴克优惠券"、"咖啡第二杯半价"）
+- sourceApp: 来源app包名（如"com.tencent.mm"为微信）
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "pasteBoardEvent"},
+    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "content": {"type": "string"},
+    "sourceApp": {"type": "string"}
+  },
+  "required": ["dataName", "timestamp", "content", "sourceApp"],
+  "additionalProperties": false
+}
+"""
+
+[frame.class.companion_memory.generate]
+instruction = """
+产出同伴记忆快照帧：生成屏幕截图分析记录。
+字段说明：
+- dataName: 固定为 "companionMemoryEvent"
+- createTime: 13位毫秒时间戳（事件创建时间）
+- updateTime: 13位毫秒时间戳（分析结果生成时间）
+- caption: 屏幕截图内容摘要（如"星巴克点单页面，显示拿铁咖啡选项"）
+- bundleName: app包名，可选值：com.sankuai.hmeituan（美团）、com.meituan.takeaway（美团外卖）、me.ele.eleme（饿了么）、com.yumc.kfc.superapp（肯德基）、com.mcdonalds.cma.hm（麦当劳）、com.lucky.luckincoffee（瑞幸）、com.starbuckschina.mystarbucksmoments（星巴克）、com.cotticoffee.cotticlient.happ（库迪）
+- status: 状态，固定为 "Init" 或 "Finish"
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "companionMemoryEvent"},
+    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "caption": {"type": "string"},
+    "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ"]},
+    "status": {"type": "string", "enum": ["Init", "Finish"]}
+  },
+  "required": ["dataName", "createTime", "updateTime", "caption", "bundleName", "status"],
+  "additionalProperties": false
+}
+"""
+
+[frame.class.screen_memory.generate]
+instruction = """
+产出屏幕记忆快照帧：生成屏幕内容分析记录。
+字段说明：
+- dataName: 固定为 "screenMemoryEvent"
+- createTime: 13位毫秒时间戳（事件创建时间）
+- updateTime: 13位毫秒时间戳（分析结果生成时间）
+- caption: 屏幕内容摘要（如"美团外卖首页，显示咖啡商家列表"）
+- bundleName: app包名，可选值：com.sankuai.hmeituan（美团）、com.meituan.takeaway（美团外卖）、me.ele.eleme（饿了么）、com.yumc.kfc.superapp（肯德基）、com.mcdonalds.cma.hm（麦当劳）、com.lucky.luckincoffee（瑞幸）、com.starbuckschina.mystarbucksmoments（星巴克）、com.cotticoffee.cotticlient.happ（库迪）
+- status: 状态，固定为 "Init" 或 "Finish"
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "screenMemoryEvent"},
+    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "caption": {"type": "string"},
+    "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ"]},
+    "status": {"type": "string", "enum": ["Init", "Finish"]}
+  },
+  "required": ["dataName", "createTime", "updateTime", "caption", "bundleName", "status"],
+  "additionalProperties": false
+}
+"""
+
+[frame.class.app_usage.generate]
+instruction = """
+产出App使用快照帧：生成app使用记录。
+字段说明：
+- dataName: 固定为 "appUsageEvent"
+- timestamp: 13位毫秒时间戳
+- bundleName: app包名，可选值：com.sankuai.hmeituan（美团）、com.meituan.takeaway（美团外卖）、me.ele.eleme（饿了么）、com.yumc.kfc.superapp（肯德基）、com.mcdonalds.cma.hm（麦当劳）、com.lucky.luckincoffee（瑞幸）、com.starbuckschina.mystarbucksmoments（星巴克）、com.cotticoffee.cotticlient.happ（库迪）
+- state: 状态，固定为 "IN"（开始使用app）或 "OUT"（结束使用app）
+- startTime: app使用开始时间（毫秒时间戳）
+- duration: 使用时长（毫秒），不能为0
+"""
+schema_inline = """
+{
+  "type": "object",
+  "properties": {
+    "dataName": {"type": "string", "const": "appUsageEvent"},
+    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ"]},
+    "state": {"type": "string", "enum": ["IN", "OUT"]},
+    "startTime": {"type": "integer"},
+    "duration": {"type": "integer", "minimum": 1000}
+  },
+  "required": ["dataName", "timestamp", "bundleName", "state", "startTime", "duration"],
+  "additionalProperties": false
+}
+"""
+
+[quality]
+enabled = true
+mode = "pointwise"
+llm = "default"
+threshold = 0.3
+
+[annotate]
+enabled = true
+llm = "default"
+instruction = """
+你是咖啡点单会话的标注员。阅读整段快照序列，抽取这次点咖啡的意图信息：
+- behaviorType：行为分类，固定为"coffee_ordering"
+- confidence：抽取置信度（0-1）
+- bundleName：使用的app包名
+- actionInfo：槽位信息（brandName、items、fulfillmentMode）
+"""
+
+[verify]
+enabled = false
+
+[output]
+meta_mode = "inline"
+rejects = "refs"
+schema_inline = """
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "behaviorType": {"type": "string"},
+    "confidence": {"type": "number"},
+    "bundleName": {"type": "string"},
+    "actionInfo": {"type": "object"}
+  },
+  "required": ["behaviorType", "confidence", "bundleName", "actionInfo"],
+  "additionalProperties": true
+}
+"""
+
+[trace]
+enabled = true
+channels = ["schema", "llm"]
+content = "refs"
