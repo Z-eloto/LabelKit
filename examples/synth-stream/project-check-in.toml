@@ -37,9 +37,38 @@ duplicates = 1
 frame_gap_s = [5, 60]
 ts_start = "2026-01-05T08:00:00+08:00"
 
-# 单一档位覆盖 check-in 场景的全部 7 种帧；每种帧在每个序列中至少出现一次。
+# 四个等权档位在满足 check-in 粗筛条件的基础上逐步增加 Caption 和工作日上下文。
+# sequences=10 时按最大余额法分配为 3、3、2、2 条。
 [[generate.stream.tiers]]
 tier_rank = 1
+weight = 1
+frame_classes = ["poi", "commute_period", "app_usage", "public_time_period"]
+
+[[generate.stream.tiers]]
+tier_rank = 2
+weight = 1
+frame_classes = [
+  "poi",
+  "commute_period",
+  "companion_memory_info",
+  "app_usage",
+  "public_time_period",
+]
+
+[[generate.stream.tiers]]
+tier_rank = 3
+weight = 1
+frame_classes = [
+  "poi",
+  "commute_period",
+  "companion_memory_info",
+  "screen_memory_info",
+  "app_usage",
+  "public_time_period",
+]
+
+[[generate.stream.tiers]]
+tier_rank = 4
 weight = 1
 frame_classes = [
   "poi",

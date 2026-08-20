@@ -125,7 +125,7 @@ FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
         "accessor": {
             "type": "object",
             "key": "publicTimePeriod",
-            "fields": ['publicTimePeriodType']
+            "fields": ['timestamp', 'publicTimePeriodType']
         }
     },
     "publicWorkDayEvent": {
@@ -134,7 +134,7 @@ FRAME_SPLIT_RULES: Dict[str, Dict[str, Any]] = {
         "accessor": {
             "type": "object",
             "key": "publicWorkDay",
-            "fields": ['publicWorkDayType']
+            "fields": ['timestamp', 'publicWorkDayType']
         }
     },
     "weekEvent": {

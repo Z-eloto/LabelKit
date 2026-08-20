@@ -1,0 +1,47 @@
+# Copy this file before use and point each scene at the artifacts you want to
+# combine.  Relative paths are resolved from this manifest's directory.
+date = "2026-01-05"
+timezone = "+08:00"
+frame_gap_ms = 1000
+session_gap_ms = 900000
+# "fit" shortens an overlong duration when it would push later scenarios out
+# of their planned places; "preserve" never changes source durations.
+duration_policy = "fit"
+output_stream = "all-day.stream.jsonl"
+output_intent = "all-day.jsonl"
+export_views = true
+
+# Add official holidays and weekend makeup workdays for the chosen year when
+# applicable.  Dates listed in makeup_workdays take precedence.
+public_holidays = []
+makeup_workdays = []
+
+[[scenes]]
+name = "check_in"
+stream = "out/synth-check-in.stream.jsonl"
+intent = "out/synth-check-in.jsonl"
+windows = ["07:30-09:30", "17:30-19:30"]
+
+[[scenes]]
+name = "navigation"
+stream = "out/synth-navigation2.stream.jsonl"
+intent = "out/synth-navigation2.jsonl"
+windows = ["06:30-10:30", "17:00-21:00"]
+
+[[scenes]]
+name = "food_ordering"
+stream = "out/synth-food-ordering-strict.stream.jsonl"
+intent = "out/synth-food-ordering-strict.jsonl"
+windows = ["11:00-13:30", "17:30-20:30"]
+
+[[scenes]]
+name = "coffee_ordering"
+stream = "out/synth-caffe-strict.stream.jsonl"
+intent = "out/synth-caffe-strict.jsonl"
+windows = ["07:00-11:00", "14:00-17:00"]
+
+[[scenes]]
+name = "grocery_purchase"
+stream = "out/synth-grocery-purchase-strict.stream.jsonl"
+intent = "out/synth-grocery-purchase-strict.jsonl"
+windows = ["17:00-21:30"]

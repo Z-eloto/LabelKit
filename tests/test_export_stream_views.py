@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import importlib.util
 import json
 import sys
@@ -101,7 +102,10 @@ def test_check_in_scalar_and_object_accessors_have_declared_shapes():
 
     assert commute["accessor"] == {"commutePeriod": "ARRIVE_COMPANY"}
     assert public_time["accessor"] == {
-        "publicTimePeriod": {"publicTimePeriodType": "FORENOON"}
+        "publicTimePeriod": {
+            "timestamp": 1_700_000_000_000,
+            "publicTimePeriodType": "FORENOON",
+        }
     }
     assert memory["accessor"] == {
         "companionMemoryInfo30min": [{
@@ -118,6 +122,88 @@ def test_check_in_scalar_and_object_accessors_have_declared_shapes():
         "eventTime": 1_700_000_000_000,
         "payload": {"commuteTransition": "ARRIVE_COMPANY"},
     }
+
+
+def test_public_accessor_csvs_include_timestamp_as_first_column(tmp_path):
+    stream_path = tmp_path / "public.stream.jsonl"
+    output_dir = tmp_path / "exported"
+    _write_jsonl(stream_path, [
+        {
+            "ts": "2023-11-14T22:13:22+00:00",
+            "text": {
+                "dataName": "publicTimePeriodEvent",
+                "timestamp": 1_700_000_002_000,
+                "publicTimePeriodType": "NIGHT",
+            },
+        },
+        {
+            "ts": "2023-11-14T22:13:21+00:00",
+            "text": {
+                "dataName": "publicWorkDayEvent",
+                "timestamp": 1_700_000_001_000,
+                "publicWorkDayType": "PUBLIC_WORKDAY",
+            },
+        },
+        {
+            "ts": "2023-11-14T22:13:20+00:00",
+            "text": {
+                "dataName": "publicTimePeriodEvent",
+                "timestamp": 1_700_000_000_000,
+                "publicTimePeriodType": "AFTERNOON",
+            },
+        },
+    ])
+
+    result = export_stream_views.export_stream_views(stream_path, output_dir)
+
+    with result["csv_outputs"]["publicTimePeriod"].open(
+        encoding="utf-8-sig", newline=""
+    ) as csv_file:
+        public_time_reader = csv.DictReader(csv_file)
+        public_time_rows = list(public_time_reader)
+        public_time_fields = public_time_reader.fieldnames
+    with result["csv_outputs"]["publicWorkDay"].open(
+        encoding="utf-8-sig", newline=""
+    ) as csv_file:
+        public_workday_reader = csv.DictReader(csv_file)
+        public_workday_rows = list(public_workday_reader)
+        public_workday_fields = public_workday_reader.fieldnames
+
+    assert public_time_fields == ["timestamp", "publicTimePeriodType"]
+    assert [row["timestamp"] for row in public_time_rows] == [
+        "1700000000000",
+        "1700000002000",
+    ]
+    assert public_workday_fields == ["timestamp", "publicWorkDayType"]
+    assert public_workday_rows == [{
+        "timestamp": "1700000001000",
+        "publicWorkDayType": "PUBLIC_WORKDAY",
+    }]
+
+    # The same timestamp must be present in the all_accessor JSON projection.
+    all_accessors = json.loads(result["json_outputs"]["all_accessor"].read_text(
+        encoding="utf-8"
+    ))
+    assert all_accessors == [
+        {
+            "publicTimePeriod": {
+                "timestamp": 1_700_000_000_000,
+                "publicTimePeriodType": "AFTERNOON",
+            }
+        },
+        {
+            "publicWorkDay": {
+                "timestamp": 1_700_000_001_000,
+                "publicWorkDayType": "PUBLIC_WORKDAY",
+            }
+        },
+        {
+            "publicTimePeriod": {
+                "timestamp": 1_700_000_002_000,
+                "publicTimePeriodType": "NIGHT",
+            }
+        },
+    ]
 
 
 def test_caffe_accessor_shape_is_not_changed_by_check_in_overrides():

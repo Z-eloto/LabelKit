@@ -38,17 +38,27 @@ duplicates = 1
 frame_gap_s = [5, 60]
 ts_start = "2026-01-05T17:00:00+08:00"
 
-# 单一档位覆盖全部 5 类帧；每种帧在每个序列中至少出现一次，因而 app_usage 必然存在。
+# 四个等权档位逐步增加购物证据；每档都包含 app_usage。
+# sequences=10 时按最大余额法分配为 3、3、2、2 条。
 [[generate.stream.tiers]]
 tier_rank = 1
 weight = 1
-frame_classes = [
-  "notification",
-  "paste_board",
-  "companion_memory",
-  "screen_memory",
-  "app_usage",
-]
+frame_classes = ["app_usage"]
+
+[[generate.stream.tiers]]
+tier_rank = 2
+weight = 1
+frame_classes = ["paste_board", "app_usage"]
+
+[[generate.stream.tiers]]
+tier_rank = 3
+weight = 1
+frame_classes = ["notification", "paste_board", "app_usage"]
+
+[[generate.stream.tiers]]
+tier_rank = 4
+weight = 1
+frame_classes = ["notification", "paste_board", "companion_memory", "screen_memory", "app_usage"]
 
 [classify]
 enabled = true
@@ -89,6 +99,8 @@ instruction = """
   - brandName：商超、菜场或平台名称，开集非空字符串，例如 "盒马"
   - items：本次订单中的商品描述数组，至少一项，例如 ["牛奶", "鸡蛋"]
   - fulfillmentMode：固定为 "delivery"（配送）
+  - timestamp：与本次买菜或商超购物行为对应的 app_usage 帧的 timestamp（13位毫秒时间戳）；
+    如果序列中存在多个 app_usage 帧，取 timestamp 最早的一个
 不要输出未声明字段。
 """
 schema_inline = """
@@ -103,9 +115,10 @@ schema_inline = """
       "properties": {
         "brandName": {"type": "string", "minLength": 1, "description": "商超、菜场或平台名称，开集字符串"},
         "items": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "蔬菜、生鲜、食品或日用品描述数组"},
-        "fulfillmentMode": {"type": "string", "const": "delivery", "description": "配送履约"}
+        "fulfillmentMode": {"type": "string", "const": "delivery", "description": "配送履约"},
+        "timestamp": {"type": "integer", "description": "对应最早 app_usage 帧的13位毫秒时间戳"}
       },
-      "required": ["brandName", "items", "fulfillmentMode"],
+      "required": ["brandName", "items", "fulfillmentMode", "timestamp"],
       "additionalProperties": false
     }
   },
@@ -296,8 +309,9 @@ enabled = true
 llm = "default"
 instruction = """
 你是买菜与商超购物会话标注员。输出 behaviorType、confidence、bundleName 和 actionInfo。
-behaviorType 固定为 "grocery_purchase"；actionInfo 仅包含 brandName、items、fulfillmentMode，
-且 fulfillmentMode 固定为 "delivery"。bundleName 只能是叮咚买菜(com.100mi.ddmc)、
+behaviorType 固定为 "grocery_purchase"；actionInfo 仅包含 brandName、items、
+fulfillmentMode 和 timestamp，且 fulfillmentMode 固定为 "delivery"；timestamp 必须取
+本序列最早 app_usage 帧的13位毫秒时间戳。bundleName 只能是叮咚买菜(com.100mi.ddmc)、
 盒马(com.wudaokou.hippo_hmos)、朴朴超市(com.pupu.app)、美团买菜/小象超市
 (com.meituan.hmaicai)、淘宝(com.taobao.taobao4hmos)、京东(com.jd.hm.mall)、
 天猫(com.tmall.tmall4hmos)、拼多多(com.xunmeng.pinduoduo.hos)、淘宝特价版
@@ -324,9 +338,10 @@ schema_inline = """
       "properties": {
         "brandName": {"type": "string", "minLength": 1},
         "items": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-        "fulfillmentMode": {"type": "string", "const": "delivery"}
+        "fulfillmentMode": {"type": "string", "const": "delivery"},
+        "timestamp": {"type": "integer", "description": "对应最早 app_usage 帧的13位毫秒时间戳"}
       },
-      "required": ["brandName", "items", "fulfillmentMode"],
+      "required": ["brandName", "items", "fulfillmentMode", "timestamp"],
       "additionalProperties": false
     }
   },

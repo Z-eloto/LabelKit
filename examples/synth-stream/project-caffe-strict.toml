@@ -38,18 +38,27 @@ duplicates = 1
 frame_gap_s = [5, 60]
 ts_start = "2026-01-05T09:00:00+08:00"
 
-# 单一档位覆盖全部帧类；tier 构成中的每一种帧在每个序列里至少出现一次，
-# 因而 app_usage 必然存在。档位包含 5 种帧，所以序列长度下限必须至少为 5。
+# 四个等权档位逐步增加购物证据；每档都包含 app_usage。
+# sequences=10 时按最大余额法分配为 3、3、2、2 条。
 [[generate.stream.tiers]]
 tier_rank = 1
 weight = 1
-frame_classes = [
-  "notification",
-  "paste_board",
-  "companion_memory",
-  "screen_memory",
-  "app_usage",
-]
+frame_classes = ["app_usage"]
+
+[[generate.stream.tiers]]
+tier_rank = 2
+weight = 1
+frame_classes = ["paste_board", "app_usage"]
+
+[[generate.stream.tiers]]
+tier_rank = 3
+weight = 1
+frame_classes = ["notification", "paste_board", "app_usage"]
+
+[[generate.stream.tiers]]
+tier_rank = 4
+weight = 1
+frame_classes = ["notification", "paste_board", "companion_memory", "screen_memory", "app_usage"]
 
 [classify]
 enabled = true
