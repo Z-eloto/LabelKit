@@ -43,6 +43,7 @@ from labelkit.common.config.model import (
     GenerateConfig,
     GenerateStreamConfig,
     GenerateStyle,
+    GenerateTimeProfile,
     InputConfig,
     OutputConfig,
     QualityConfig,
@@ -179,6 +180,15 @@ def mk_timed_cfg(**kwargs) -> ResolvedConfig:
     kwargs.setdefault("frame_schema", TIMED_SCHEMA)
     kwargs.setdefault("time_fields", TIME_FIELDS)
     return mk_cfg(**kwargs)
+
+
+def with_time_profiles(cfg: ResolvedConfig,
+                       profiles: tuple[GenerateTimeProfile, ...]) -> ResolvedConfig:
+    views = {
+        name: replace(view, generate=replace(view.generate, time_profiles=profiles))
+        for name, view in cfg.class_views.items()
+    }
+    return replace(cfg, class_views=views)
 
 
 class StreamEngine:
@@ -795,6 +805,58 @@ def test_sequence_plan_tier_rank_defaults_to_none():
     assert plan.tier_rank is None
 
 
+def test_time_profiles_rotate_across_ordinals_and_allocate_disjoint_slots():
+    profiles = (
+        GenerateTimeProfile("to_work", 1, 390, 630, "上午去公司"),
+        GenerateTimeProfile("to_home", 1, 1020, 1320, "傍晚回家"),
+    )
+    cfg = with_time_profiles(
+        mk_cfg(quotas={"booking": 4}, sessions=4, len_range=(2, 2)), profiles)
+    plans = plan_stream(cfg, random.Random("profiles")).sequences
+    assert [plan.time_profile_name for plan in plans] == [
+        "to_work", "to_home", "to_work", "to_home"]
+    assert [(plan.schedule_start.hour, plan.schedule_start.minute,
+             plan.schedule_end.hour, plan.schedule_end.minute)
+            for plan in plans] == [
+                (6, 30, 8, 30), (17, 0, 19, 30),
+                (8, 30, 10, 30), (19, 30, 22, 0)]
+    prompt_instruction = GenerateStage._scheduled_instruction("生成导航", plans[0])
+    assert "本序列时间 Profile：to_work" in prompt_instruction
+    assert "2026-01-01T06:30:00+08:00" in prompt_instruction
+    assert "上午去公司" in prompt_instruction
+
+
+def test_scheduled_layout_respects_duration_and_profile_windows():
+    profiles = (
+        GenerateTimeProfile("to_work", 1, 390, 630, "上午去公司"),
+        GenerateTimeProfile("to_home", 1, 1020, 1320, "傍晚回家"),
+    )
+    cfg = with_time_profiles(
+        mk_cfg(quotas={"booking": 2}, sessions=2, len_range=(2, 2)), profiles)
+    plans = plan_stream(cfg, random.Random("profile-plan")).sequences
+    realized = [RealizedSequence(
+        plan=plan, frame_classes=("task_request", "task_request"),
+        # 故意给出装不进时间槽的时长，铺时器应机械压缩并保持约束。
+        payloads=({"utterance": "开始", "duration": 99_999_999},
+                  {"utterance": "结束", "duration": 99_999_999}))
+        for plan in plans]
+    sessions, _ = weave_stream(realized, (), cfg, random.Random("profile-weave"))
+    assert [session[0].truth["time_profile"] for session in sessions] == [
+        "to_work", "to_home"]
+    previous = None
+    for session in sessions:
+        stamps = [datetime.fromisoformat(slot.ts) for slot in session]
+        assert session[0].schedule_start <= stamps[0]
+        last_end = stamps[-1] + timedelta(
+            milliseconds=session[-1].payload["duration"])
+        assert last_end < session[-1].schedule_end
+        assert stamps[1] > stamps[0] + timedelta(
+            milliseconds=session[0].payload["duration"])
+        if previous is not None:
+            assert stamps[0] > previous
+        previous = last_end
+
+
 def test_tier_mapping_is_ascending_contiguous_blocks():
     """映射 = 配分结果按 tier_rank 升序的连续分块前缀和（裁决·零抽签配分）。"""
     assert apportion_tiers(5, TIERS) == (3, 2)
@@ -1131,6 +1193,23 @@ def test_time_field_values_keep_microsecond_resolution():
     backfill_time_fields([slots], cfg)
     assert payloads[0]["duration"] == 1e-06
     assert payloads[1]["since_prev"] == 1e-06 == payloads[1]["elapsed"]
+
+
+def test_millisecond_and_calendar_time_terms_are_mechanically_derived():
+    cfg = mk_cfg(quotas={"booking": 1}, sessions=1)
+    bindings = {"timestamp": "ts_ms", "endTime": "end_ts_ms",
+                "period": "day_period", "workday": "workday_type"}
+    views = dict(cfg.frame_class_views)
+    views["task_request"] = replace(views["task_request"], time_fields=bindings)
+    cfg = replace(cfg, frame_class_views=views)
+    payload = {"utterance": "上班导航", "duration": 5000}
+    slot = _StreamSlot(payload=payload, truth={"frame_class": "task_request"},
+                       owner=0, ts="2026-01-05T06:30:00.000000+08:00")
+    backfill_time_fields([[slot]], cfg)
+    assert payload["timestamp"] == 1767565800000
+    assert payload["endTime"] == payload["timestamp"] + 5000
+    assert payload["period"] == "MORNING"
+    assert payload["workday"] == "PUBLIC_WORKDAY"
 
 
 def test_backfilled_values_match_the_in_sequence_neighbour_gaps():

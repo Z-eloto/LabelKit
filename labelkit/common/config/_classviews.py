@@ -48,6 +48,7 @@ from labelkit.common.config.model import (
     FrameClassifyConfig,
     FrameClassView,
     GenerateConfig,
+    GenerateTimeProfile,
     QualityConfig,
     Rubric,
     VerifyConfig,
@@ -64,8 +65,8 @@ from labelkit.common.config.model import (
 _CLASS_SECTION_KEYS: dict[str, tuple[str, ...]] = {
     "quality": ("mode", "rounds", "rubric", "threshold", "selection", "top_ratio"),
     "annotate": ("instruction", "examples", "schema_path", "schema_inline"),
-    "generate": ("instruction", "styles", "num_per_record", "temperature",
-                 "sequences", "len_range"),
+    "generate": ("instruction", "styles", "time_profiles", "num_per_record",
+                 "temperature", "sequences", "len_range"),
     "verify": ("extra_criteria",),
     "extract": ("instruction",),
 }
@@ -339,11 +340,70 @@ def _merge_class_generate(col: _Collector, file: str, cname: str, g_over: dict,
         instruction=t.get_str("instruction", base.instruction, nonempty=True),
         styles=(_parse_styles(col, file, t.take("styles"), section=f"class.{cname}.generate")
                 if "styles" in g_over else base.styles),
+        time_profiles=(_parse_time_profiles(col, file, cname, t.take("time_profiles"))
+                       if "time_profiles" in g_over else base.time_profiles),
         num_per_record=t.get_int("num_per_record", base.num_per_record, minimum=1),
         temperature=t.get_float("temperature", base.temperature, bound=_GE0),
         sequences=t.get_int("sequences", base.sequences, minimum=0),
         len_range=_int_pair(t, "len_range", base.len_range),
     )
+
+
+def _parse_hhmm(col: _Collector, loc: str, value: Any) -> int | None:
+    """把严格 ``HH:MM`` 墙钟时间解析为午夜后的分钟数。"""
+    if not isinstance(value, str):
+        col.error(f"{loc}: expected an HH:MM string, got {_fmt(value)}")
+        return None
+    parts = value.split(":")
+    if (len(parts) != 2 or len(parts[0]) != 2 or len(parts[1]) != 2
+            or not all(part.isdigit() for part in parts)):
+        col.error(f"{loc}: expected an HH:MM string, got {_fmt(value)}")
+        return None
+    hour, minute = (int(part) for part in parts)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        col.error(f"{loc}: expected a valid local wall-clock time in HH:MM, got "
+                  f"{_fmt(value)}")
+        return None
+    return hour * 60 + minute
+
+
+def _parse_time_profiles(col: _Collector, file: str, cname: str,
+                         raw: Any) -> tuple[GenerateTimeProfile, ...]:
+    """解析 ``[[class.<name>.generate.time_profiles]]``。"""
+    base = f"[class.{cname}.generate].time_profiles"
+    if not isinstance(raw, list):
+        col.error(f"{file}:{base}: expected array of tables, got {_fmt(raw)}")
+        return ()
+    profiles: list[GenerateTimeProfile] = []
+    names: set[str] = set()
+    for index, sub in enumerate(raw, 1):
+        loc = f"[[class.{cname}.generate.time_profiles]][{index}]"
+        if not isinstance(sub, dict):
+            col.error(f"{file}:{loc}: expected table, got {_fmt(sub)}")
+            continue
+        t = _Tbl(col, file, loc, sub)
+        name = t.get_str("name", None, required=True, nonempty=True)
+        weight = t.get_int("weight", None, minimum=1)
+        start_raw = t.take("start")
+        end_raw = t.take("end")
+        instruction = t.get_str("instruction", None, required=True, nonempty=True)
+        start = _parse_hhmm(col, f"{file}:{loc}.start", start_raw)
+        end = _parse_hhmm(col, f"{file}:{loc}.end", end_raw)
+        t.finish()
+        if name is not None:
+            if name in names:
+                col.error(f"{file}:{base}.name: profile names must be unique, got duplicate "
+                          f"{_fmt(name)}")
+            names.add(name)
+        if start is not None and end is not None and start >= end:
+            col.error(f"{file}:{loc}: expected start < end within one natural day, got "
+                      f"{_fmt(sub.get('start'))} .. {_fmt(sub.get('end'))}")
+        if (name is not None and weight is not None and start is not None
+                and end is not None and start < end and instruction is not None):
+            profiles.append(GenerateTimeProfile(name=name, weight=weight,
+                                                start_minute=start, end_minute=end,
+                                                instruction=instruction))
+    return tuple(profiles)
 
 
 def _merge_class_verify(col: _Collector, file: str, cname: str, v_over: dict,

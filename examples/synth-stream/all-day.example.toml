@@ -26,7 +26,7 @@ windows = ["07:30-09:30", "17:30-19:30"]
 name = "navigation"
 stream = "out/synth-navigation2.stream.jsonl"
 intent = "out/synth-navigation2.jsonl"
-windows = ["06:30-10:30", "17:00-21:00"]
+windows = ["06:30-10:30", "17:00-22:00"]
 
 [[scenes]]
 name = "food_ordering"

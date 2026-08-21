@@ -3,7 +3,7 @@
 schema_version = 1
 
 [run]
-output = "./out/synth-navigation2.jsonl"
+output = "./out/synth-navigation.jsonl"
 modality = "text"
 mode = "generate_only"
 batch_size = 8
@@ -33,7 +33,7 @@ noise_instruction = """
 生成与导航出行无关的干扰输入，例如查看新闻、播放音乐或短暂切换应用。
 长度 5–15 字，内容自然，但不能包含通勤、路线、目的地或导航等关键信息。
 """
-duplicates = 1
+duplicates = 0
 frame_gap_s = [5, 60]
 ts_start = "2026-01-05T08:00:00+08:00"
 
@@ -83,8 +83,8 @@ description = "用户通勤、回家、去公司或前往其他目的地时发�
 
 [class.navigation.generate]
 instruction = """
-生成一段完整、连贯的导航出行序列，覆盖通勤、回家、去公司或前往其他目的地之一。
-每个序列包含 app_usage、POI、通勤阶段、当天工作日与时间语义、同伴记忆和屏幕记忆帧。
+生成一段完整、连贯的导航出行序列；具体帧类组成由本序列 tier 决定，不得擅自补入
+tier 之外的帧类。
 每个序列从导航 App 闭集中选择一个应用：高德地图(com.amap.hmapp)或
 百度地图(com.baidu.hmmap)；所有相关帧的应用与 bundleName 必须一致。
 明确且始终保持同一组出发地、目的地、出行方式和路线偏好；出发地与目的地不能相同。
@@ -93,6 +93,36 @@ instruction = """
 """
 sequences = 10
 len_range = [7, 10]
+
+# 生成前先固定方向和日内时间槽，再让模型生成内容；两个 Profile 等权轮转，避免与
+# tier 的连续配额块绑定。时间戳与公共时间字段在交织后由程序机械回填。
+[[class.navigation.generate.time_profiles]]
+name = "to_work"
+weight = 1
+start = "06:30"
+end = "10:30"
+instruction = """
+本序列固定为工作日上午从家前往公司或研究机构的导航：origin 是 HOME，destination
+是 COMPANY 或 RESEARCH_INSTITUTE。所有 Caption 只能描述早晨/上午上班、离家、路线
+规划、导航中或到达办公地，不能描述下班或回家。若出现 commute_period：只有一帧时
+使用 LEAVE_HOME；有两帧及以上时先 LEAVE_HOME 后 ARRIVE_COMPANY，不能出现
+LEAVE_COMPANY 或 ARRIVE_HOME。若出现 POI，应表示出发前的 HOME 或到达后的办公地，
+并与路线阶段一致。
+"""
+
+[[class.navigation.generate.time_profiles]]
+name = "to_home"
+weight = 1
+start = "17:00"
+end = "22:00"
+instruction = """
+本序列固定为工作日傍晚或晚上从公司/研究机构回家的导航：origin 是 COMPANY 或
+RESEARCH_INSTITUTE，destination 是 HOME。所有 Caption 只能描述下班、离开办公地、
+回家路线、导航中或到家，不能描述早晨上班。若出现 commute_period：只有一帧时使用
+LEAVE_COMPANY；有两帧及以上时先 LEAVE_COMPANY 后 ARRIVE_HOME，不能出现
+LEAVE_HOME 或 ARRIVE_COMPANY。若出现 POI，应表示离开前的办公地或到达后的 HOME，
+并与路线阶段一致。
+"""
 
 [class.navigation.annotate]
 instruction = """
@@ -200,8 +230,8 @@ schema_inline = """
     "poiName": {"type": "string", "minLength": 1, "description": "开集地点名称，对应示例源字段 column1；生成提示中的地点仅为样例"},
     "longitude": {"type": "number", "minimum": -180, "maximum": 180, "description": "地点经度，对应示例源字段 column5"},
     "latitude": {"type": "number", "minimum": -90, "maximum": 90, "description": "地点纬度，对应示例源字段 column4"},
-    "startTime": {"type": "integer", "description": "进入地点的13位毫秒时间戳，对应 inTimestamp"},
-    "endTime": {"type": "integer", "description": "离开地点的13位毫秒时间戳，对应 outTimestamp，必须晚于 startTime"},
+    "startTime": {"type": "integer"},
+    "endTime": {"type": "integer"},
     "duration": {"type": "integer", "minimum": 1000, "description": "停留时长（毫秒），等于 endTime-startTime；源 residenceTimeInSeconds 使用秒"}
   },
   "required": ["dataName", "poiType", "poiName", "longitude", "latitude", "startTime", "endTime", "duration"],
@@ -229,7 +259,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "commutePeriodEvent", "description": "规范化帧名；源 GoToWorkCommute/GetOffWorkCommute 仅用于判断方向"},
-    "timestamp": {"type": "integer", "description": "13位毫秒事件时间；离开事件对应源 inTimestamp，到达事件对应源 outTimestamp"},
+    "timestamp": {"type": "integer"},
     "periodType": {"type": "string", "enum": ["LEAVE_HOME", "ARRIVE_COMPANY", "LEAVE_COMPANY", "ARRIVE_HOME"], "description": "通勤状态转换；上班为 LEAVE_HOME/ARRIVE_COMPANY，下班为 LEAVE_COMPANY/ARRIVE_HOME"}
   },
   "required": ["dataName", "timestamp", "periodType"],
@@ -257,8 +287,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "companionMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "entityId": {"type": "string"},
     "pageId": {"type": "string"},
     "caption": {"type": "string"},
@@ -290,8 +320,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "screenMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "entityId": {"type": "string"},
     "pageId": {"type": "string"},
     "caption": {"type": "string"},
@@ -322,7 +352,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "appUsageEvent"},
-    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "timestamp": {"type": "integer"},
     "bundleName": {"type": "string", "enum": ["com.amap.hmapp", "com.baidu.hmmap"], "description": "导航应用包名：高德地图或百度地图"},
     "state": {"type": "string", "enum": ["IN", "OUT"]},
     "startTime": {"type": "integer"},
@@ -350,8 +380,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "publicTimePeriodEvent", "description": "规范化公共时段事件名"},
-    "timestamp": {"type": "integer", "description": "13位毫秒事件或状态观测时间，对应示例外层 timestamp"},
-    "publicTimePeriodType": {"type": "string", "enum": ["MIDNIGHT", "MORNING", "FORENOON", "NOON", "AFTERNOON", "NIGHT"], "description": "一天中的公共时段，对应源 Time_PublicTimePeriod[].publicTimePeriodType"}
+    "timestamp": {"type": "integer"},
+    "publicTimePeriodType": {"type": "string"}
   },
   "required": ["dataName", "timestamp", "publicTimePeriodType"],
   "additionalProperties": false
@@ -374,13 +404,41 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "publicWorkDayEvent", "description": "规范化公共工作日事件名"},
-    "timestamp": {"type": "integer", "description": "公共工作日状态开始生效的13位毫秒时间戳，对应源 Time_PublicWorkDay[].inTimestamp"},
-    "publicWorkDayType": {"type": "string", "enum": ["PUBLIC_WORKDAY", "PUBLIC_HOLIDAY"], "description": "公共工作日类型，对应源 Time_PublicWorkDay[].publicWorkDayType"}
+    "timestamp": {"type": "integer"},
+    "publicWorkDayType": {"type": "string"}
   },
   "required": ["dataName", "timestamp", "publicWorkDayType"],
   "additionalProperties": false
 }
 """
+
+# 时间字段统一由最终时间轴回填，模型只负责非时间语义内容。
+[frame.class.poi.generate.time_fields]
+startTime = "ts_ms"
+endTime = "end_ts_ms"
+
+[frame.class.commute_period.generate.time_fields]
+timestamp = "ts_ms"
+
+[frame.class.companion_memory_info.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.screen_memory_info.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.app_usage.generate.time_fields]
+timestamp = "ts_ms"
+startTime = "ts_ms"
+
+[frame.class.public_time_period.generate.time_fields]
+timestamp = "ts_ms"
+publicTimePeriodType = "day_period"
+
+[frame.class.public_workday.generate.time_fields]
+timestamp = "ts_ms"
+publicWorkDayType = "workday_type"
 
 [quality]
 enabled = true

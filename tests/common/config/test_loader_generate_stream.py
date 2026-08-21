@@ -675,8 +675,8 @@ def test_class_generate_quota_keys_are_whitelisted(env):
     errors = env.errors(project_text=env.project(
         body=CLASSIFY_TWO + "\n[class.qa.generate]\nsequence_count = 3\n"))
     has(errors, "[class.qa.generate].sequence_count: [class.*.generate] cannot override this "
-                "key (whitelist: instruction, styles, num_per_record, temperature, sequences, "
-                "len_range)")
+                "key (whitelist: instruction, styles, time_profiles, num_per_record, "
+                "temperature, sequences, len_range)")
 
 
 def test_forbidden_generate_key_probe_skips_classes_without_a_generate_table(env):
@@ -1230,8 +1230,9 @@ def test_time_fields_value_must_be_in_the_frozen_vocabulary(env):
     frames = bind_frames('duration = "gap_s"')
     errors = env.errors(project_text=gs_project(env, gs_body(frames=frames)))
     has(errors, "[frame.class.task_request.generate.time_fields].duration: expected one of "
-                "the time vocabulary terms ts, gap_prev_s, gap_next_s, elapsed_s (a frozen "
-                'closed set), got "gap_s"')
+                "the time vocabulary terms ts, ts_ms, end_ts_ms, gap_prev_s, gap_next_s, "
+                "elapsed_s, day_period, workday_type (a frozen closed set), got "
+                '"gap_s"')
 
 
 @pytest.mark.parametrize("prop, got", [

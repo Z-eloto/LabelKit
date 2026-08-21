@@ -309,6 +309,21 @@ class GenerateStyle:
 
 
 @dataclass(frozen=True)
+class GenerateTimeProfile:
+    """序列生成前的语义与时间窗口约束。
+
+    Profile 按权重零抽签配额；窗口使用 ``ts_start`` 所在自然日的本地墙钟时间。
+    ``instruction`` 会同时注入蓝图与逐帧实现提示，避免后处理改时造成语义漂移。
+    """
+
+    name: str
+    weight: int
+    start_minute: int
+    end_minute: int
+    instruction: str
+
+
+@dataclass(frozen=True)
 class TierSpec:
     """v1.14（裁决·档位即帧类构成）：``[[generate.stream.tiers]]`` 档位表的一项。
 
@@ -402,6 +417,8 @@ class GenerateConfig:
     mixture: Literal["round_robin", "weighted"] = "round_robin"     # 多档案混合方式
     weights: tuple[float, ...] = ()               # mixture="weighted" 时必填；len == len(llms)
     styles: tuple[GenerateStyle, ...] = ()        # 可选风格表（逐样本轮转）
+    time_profiles: tuple[GenerateTimeProfile, ...] = ()
+                                                  # 可选的序列语义/日内时间窗口表；仅时间流形态生效
     num_per_record: int = 2                       # process 模式：每条种子记录生成几条
     seeds_per_call: int = 3                       # process 模式：每次调用喂几条种子
     num_per_call: int = 4                         # 每次调用产出几个样本

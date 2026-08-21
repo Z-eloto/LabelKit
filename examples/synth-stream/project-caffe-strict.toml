@@ -1,6 +1,6 @@
 # project-caffe-strict.toml - 买咖啡场景时间流生成（强制 app_usage）
 # 每帧包含 event + accessor 的所有字段（扁平结构），后处理可按规则拆分
-# event/accessor 严格递增需在导出时启用 export_stream_views.py --calibrate-timestamps。
+# Profile 时间轴会在生成阶段保证帧起点与 duration 严格衔接；导出校准仅作兼容兜底。
 schema_version = 1
 
 [run]
@@ -34,7 +34,7 @@ noise_instruction = """
 生成与咖啡点单无关的干扰输入：用户随手滑动屏幕、看一下天气或时间等无目的操作，
 长度 5–15 字，如"看一下天气"、"随便刷刷"等。
 """
-duplicates = 1
+duplicates = 0
 frame_gap_s = [5, 60]
 ts_start = "2026-01-05T09:00:00+08:00"
 
@@ -84,6 +84,26 @@ instruction = """
 """
 sequences = 10
 len_range = [5, 6]
+
+[[class.coffee_order.generate.time_profiles]]
+name = "morning_coffee"
+weight = 1
+start = "07:00"
+end = "11:00"
+instruction = """
+本序列固定发生在早晨或上午。所有通知、剪贴板与 Caption 只能描述早餐后、上班途中或
+上午购买咖啡，不能出现下午茶、傍晚或深夜表述；商品、门店、履约方式和订单状态保持一致。
+"""
+
+[[class.coffee_order.generate.time_profiles]]
+name = "afternoon_coffee"
+weight = 1
+start = "14:00"
+end = "17:00"
+instruction = """
+本序列固定发生在下午。所有通知、剪贴板与 Caption 只能描述午后或下午茶时段购买咖啡，
+不能出现早餐、清晨或深夜表述；商品、门店、履约方式和订单状态保持一致。
+"""
 
 [class.coffee_order.annotate]
 instruction = """
@@ -167,7 +187,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "notificationEvent"},
-    "messageTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "messageTime": {"type": "integer"},
     "content": {"type": "string"},
     "appName": {"type": "string"},
     "bundleName": {"type": "string", "enum": ["com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
@@ -195,7 +215,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "pasteBoardEvent"},
-    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "timestamp": {"type": "integer"},
     "content": {"type": "string"},
     "sourceApp": {"type": "string", "enum": ["com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]}
   },
@@ -223,8 +243,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "companionMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "caption": {"type": "string"},
     "bundleName": {"type": "string", "enum": ["com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
     "status": {"type": "string", "enum": ["Init", "Finish"]}
@@ -253,8 +273,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "screenMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "caption": {"type": "string"},
     "bundleName": {"type": "string", "enum": ["com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
     "status": {"type": "string", "enum": ["Init", "Finish"]}
@@ -284,7 +304,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "appUsageEvent"},
-    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "timestamp": {"type": "integer"},
     "bundleName": {"type": "string", "enum": ["com.lucky.luckincoffee", "com.starbuckschina.mystarbucksmoments", "com.cotticoffee.cotticlient.happ", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
     "state": {"type": "string", "enum": ["IN", "OUT"]},
     "startTime": {"type": "integer"},
@@ -294,6 +314,26 @@ schema_inline = """
   "additionalProperties": false
 }
 """
+
+# 时间字段由生成后的 Profile 时间轴机械回填。
+[frame.class.notification.generate.time_fields]
+messageTime = "ts_ms"
+timestamp = "ts_ms"
+
+[frame.class.paste_board.generate.time_fields]
+timestamp = "ts_ms"
+
+[frame.class.companion_memory.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.screen_memory.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.app_usage.generate.time_fields]
+timestamp = "ts_ms"
+startTime = "ts_ms"
 
 [quality]
 enabled = true

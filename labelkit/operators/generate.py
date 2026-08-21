@@ -50,7 +50,7 @@ import re
 import statistics
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
@@ -79,6 +79,7 @@ if TYPE_CHECKING:
         FrameClassView,
         GenerateConfig,
         GenerateStyle,
+        GenerateTimeProfile,
         ResolvedConfig,
         TierSpec,
     )
@@ -875,6 +876,10 @@ class SequencePlan:
     style_prompt: str | None    # 预抽风格提示词
     tier_rank: int | None = None    # v1.14 档位序数（配分的连续分块查表所得，零 rng）；
                                     # None = 档位面不在场（档位表缺省）
+    time_profile_name: str | None = None
+    time_profile_instruction: str | None = None
+    schedule_start: datetime | None = None
+    schedule_end: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -946,6 +951,56 @@ def tier_rank_for_ordinal(sequences: int, tiers: "Sequence[TierSpec]",
     return None
 
 
+def _apportion_time_profiles(sequences: int,
+                             profiles: "Sequence[GenerateTimeProfile]") -> tuple[int, ...]:
+    """按整数域最大余额法为时间 Profile 配额，声明顺序负责平票。"""
+    if not profiles:
+        return ()
+    total_weight = sum(profile.weight for profile in profiles)
+    scaled = [sequences * profile.weight for profile in profiles]
+    quotas = [value // total_weight for value in scaled]
+    remainders = [value % total_weight for value in scaled]
+    order = sorted(range(len(profiles)), key=lambda i: (-remainders[i], i))
+    for index in order[:sequences - sum(quotas)]:
+        quotas[index] += 1
+    return tuple(quotas)
+
+
+def _time_profile_for_ordinal(sequences: int,
+                              profiles: "Sequence[GenerateTimeProfile]",
+                              ordinal: int,
+                              ) -> tuple["GenerateTimeProfile", int, int] | None:
+    """轮转分散 Profile，返回 (Profile, Profile 内序数, Profile 配额)。
+
+    轮转而非连续分块可避免 Profile 与 tier 的类内连续分块发生偶然绑定。
+    """
+    quotas = _apportion_time_profiles(sequences, profiles)
+    remaining = list(quotas)
+    assignment: list[int] = []
+    while any(remaining):
+        for index in range(len(profiles)):
+            if remaining[index]:
+                assignment.append(index)
+                remaining[index] -= 1
+    if ordinal >= len(assignment):
+        return None
+    profile_index = assignment[ordinal]
+    occurrence = sum(1 for index in assignment[:ordinal] if index == profile_index)
+    return profiles[profile_index], occurrence, quotas[profile_index]
+
+
+def _scheduled_profile_bounds(ts_start: str, profile: "GenerateTimeProfile",
+                              occurrence: int, quota: int) -> tuple[datetime, datetime]:
+    """把 Profile 窗口均分为互不重叠的单序列时间槽。"""
+    base = datetime.fromisoformat(ts_start)
+    midnight = base.replace(hour=0, minute=0, second=0, microsecond=0)
+    window_start = midnight + timedelta(minutes=profile.start_minute)
+    span = timedelta(minutes=profile.end_minute - profile.start_minute)
+    start = window_start + span * (occurrence / quota)
+    end = window_start + span * ((occurrence + 1) / quota)
+    return start, end
+
+
 def plan_stream(cfg: "ResolvedConfig", rng: "random.Random") -> StreamPlan:
     """计划期纯函数（M10 estimate_run 精确复演共用，裁决·估算精确复演）。
 
@@ -959,6 +1014,18 @@ def plan_stream(cfg: "ResolvedConfig", rng: "random.Random") -> StreamPlan:
     tiers = cfg.generate_stream.tiers
     ranks = [tier_rank_for_ordinal(cfg.class_views[name].generate.sequences,
                                    tiers, ordinal) for name, ordinal in entries]
+    scheduled = []
+    for name, ordinal in entries:
+        gen_c = cfg.class_views[name].generate
+        selected = _time_profile_for_ordinal(gen_c.sequences, gen_c.time_profiles,
+                                             ordinal)
+        if selected is None:
+            scheduled.append(None)
+            continue
+        profile, occurrence, quota = selected
+        bounds = _scheduled_profile_bounds(cfg.generate_stream.ts_start, profile,
+                                           occurrence, quota)
+        scheduled.append((profile, *bounds))
     lengths: list[int] = []
     for name, _ in entries:
         lo, hi = cfg.class_views[name].generate.len_range
@@ -971,11 +1038,18 @@ def plan_stream(cfg: "ResolvedConfig", rng: "random.Random") -> StreamPlan:
     pairs = predraw_llm_style(g, len(entries) + n_noise, rng,
                               styles_by_index=styles_by_index)
     sequences = tuple(
-        SequencePlan(index=i, class_name=name, ordinal=ordinal, length=lengths[i],
-                     llm=pairs[i][0],
-                     style_name=pairs[i][1].name if pairs[i][1] else None,
-                     style_prompt=pairs[i][1].prompt if pairs[i][1] else None,
-                     tier_rank=ranks[i])
+        SequencePlan(
+            index=i, class_name=name, ordinal=ordinal, length=lengths[i],
+            llm=pairs[i][0],
+            style_name=pairs[i][1].name if pairs[i][1] else None,
+            style_prompt=pairs[i][1].prompt if pairs[i][1] else None,
+            tier_rank=ranks[i],
+            time_profile_name=(scheduled[i][0].name if scheduled[i] else None),
+            time_profile_instruction=(scheduled[i][0].instruction
+                                      if scheduled[i] else None),
+            schedule_start=(scheduled[i][1] if scheduled[i] else None),
+            schedule_end=(scheduled[i][2] if scheduled[i] else None),
+        )
         for i, (name, ordinal) in enumerate(entries))
     offset = len(entries)
     noise_plans = tuple(
@@ -998,6 +1072,8 @@ class _StreamSlot:
     truth: dict                 # 冻结键集 truth（session 值交织尾声回填）
     owner: int | None           # 幸存序列下标（任务帧）；噪音/重复帧 = None
     ts: str = ""                # ⑨ 铺设的 ISO-8601 时间戳
+    schedule_start: datetime | None = None
+    schedule_end: datetime | None = None
 
 
 def _tier_truth(tier_rank: int | None, tiered: bool) -> dict:
@@ -1011,16 +1087,24 @@ def _tier_truth(tier_rank: int | None, tiered: bool) -> dict:
     return {"tier_rank": tier_rank} if tiered else {}
 
 
+def _time_profile_truth(name: str | None) -> dict:
+    """Profile 面缺省时不增加工件字段，保持旧配置输出不变。"""
+    return {"time_profile": name} if name is not None else {}
+
+
 def _sequence_slots(index: int, seq: RealizedSequence) -> list[_StreamSlot]:
     """一条幸存序列的任务帧槽位（truth.session 占位 −1，交织尾声回填）。v1.14：
     档位表在场时 truth 带本序列的档位序数。"""
     plan = seq.plan
     tier = _tier_truth(plan.tier_rank, tiered=plan.tier_rank is not None)
+    profile = _time_profile_truth(plan.time_profile_name)
     return [_StreamSlot(payload=seq.payloads[i],
                         truth={"session": -1, "sequence_class": plan.class_name,
                                "sequence": plan.ordinal, **tier,
+                               **profile,
                                "frame_class": seq.frame_classes[i], "noise": False},
-                        owner=index)
+                        owner=index, schedule_start=plan.schedule_start,
+                        schedule_end=plan.schedule_end)
             for i in range(len(seq.payloads))]
 
 
@@ -1110,6 +1194,9 @@ def _lay_timestamps(sessions: list[list[_StreamSlot]], cfg: "ResolvedConfig",
     间隔 uniform(gap_s + lo, gap_s + hi)（恒 > stream.gap_s ⇒ 摄取侧按同一 gap_s
     复演出相同会话切分）；datetime + timedelta 正间隔累加 ⇒ 严格递增；isoformat
     微秒精度写出。"""
+    if any(slot.schedule_start is not None for session in sessions for slot in session):
+        _lay_scheduled_timestamps(sessions, cfg, rng)
+        return
     lo, hi = cfg.generate_stream.frame_gap_s
     gap = float(cfg.stream.gap_s)
     current = datetime.fromisoformat(cfg.generate_stream.ts_start)
@@ -1123,6 +1210,70 @@ def _lay_timestamps(sessions: list[list[_StreamSlot]], cfg: "ResolvedConfig",
             else:
                 current += timedelta(seconds=rng.uniform(lo, hi))
             slot.ts = current.isoformat(timespec="microseconds")
+
+
+def _payload_duration_ms(slot: _StreamSlot) -> int:
+    """返回载荷 duration 的正整数毫秒值；无该字段的帧视为瞬时帧。"""
+    if not isinstance(slot.payload, dict):
+        return 0
+    value = slot.payload.get("duration")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    return max(1000, int(value))
+
+
+def _fit_scheduled_durations(session: list[_StreamSlot], budget_ms: int) -> list[int]:
+    """在时间槽预算内按比例压缩 duration，并把结果写回载荷。"""
+    durations = [_payload_duration_ms(slot) for slot in session]
+    positive = [index for index, value in enumerate(durations) if value]
+    if not positive or sum(durations) <= budget_ms:
+        return durations
+    minimum_total = 1000 * len(positive)
+    available_extra = max(0, budget_ms - minimum_total)
+    requested_extra = sum(durations[index] - 1000 for index in positive)
+    fitted = list(durations)
+    for index in positive:
+        share = (durations[index] - 1000) / requested_extra if requested_extra else 0
+        fitted[index] = 1000 + int(available_extra * share)
+    overflow = sum(fitted) - budget_ms
+    for index in sorted(positive, key=lambda i: fitted[i], reverse=True):
+        if overflow <= 0:
+            break
+        reduction = min(overflow, fitted[index] - 1000)
+        fitted[index] -= reduction
+        overflow -= reduction
+    for slot, value in zip(session, fitted):
+        if value and isinstance(slot.payload, dict):
+            slot.payload["duration"] = value
+    return fitted
+
+
+def _lay_scheduled_timestamps(sessions: list[list[_StreamSlot]], cfg: "ResolvedConfig",
+                              rng: "random.Random") -> None:
+    """按生成前时间槽铺时，并保证下一帧晚于前帧结束时间。
+
+    M1 已保证每条计划序列是独立会话且没有噪音/重发。会话按时间槽排序；若模型给出的
+    duration 总量装不进槽内，仅机械压缩 duration，不移动槽、更不改自然语言语义。
+    """
+    sessions.sort(key=lambda session: session[0].schedule_start or datetime.max)
+    lo, hi = cfg.generate_stream.frame_gap_s
+    for session in sessions:
+        if not session:
+            continue
+        start = session[0].schedule_start
+        end = session[0].schedule_end
+        if start is None or end is None:
+            raise ValueError("scheduled and unscheduled stream slots cannot be mixed")
+        gaps_ms = [max(1, round(rng.uniform(lo, hi) * 1000))
+                   for _ in range(max(0, len(session) - 1))]
+        span_ms = max(1, int((end - start).total_seconds() * 1000))
+        duration_budget = max(1000, span_ms - sum(gaps_ms) - 1)
+        durations = _fit_scheduled_durations(session, duration_budget)
+        current = start
+        for index, slot in enumerate(session):
+            slot.ts = current.isoformat(timespec="microseconds")
+            if index + 1 < len(session):
+                current += timedelta(milliseconds=durations[index] + gaps_ms[index])
 
 
 def weave_stream(survivors: Sequence[RealizedSequence], noise_payloads: Sequence[str],
@@ -1145,10 +1296,10 @@ def weave_stream(survivors: Sequence[RealizedSequence], noise_payloads: Sequence
                                 cfg.stream.session_max_len, rng)           # ⑦
     for source in chosen:                                                  # ⑧
         sessions.append(_duplicate_slots(source))
+    _lay_timestamps(sessions, cfg, rng)                                    # ⑨
     for session_no, session in enumerate(sessions):
         for slot in session:
             slot.truth["session"] = session_no
-    _lay_timestamps(sessions, cfg, rng)                                    # ⑨
     stats = {"sessions": len(sessions) - dup_k, "crossed_sessions": crossed,
              "frames": sum(len(seq.payloads) for seq in survivors),
              "noise_frames": woven_noise, "duplicates": dup_k}
@@ -1185,8 +1336,29 @@ def _reduced_gen_schema(view: "FrameClassView") -> dict | None:
     return reduced
 
 
+def _epoch_ms(value: datetime) -> int:
+    """转 Unix epoch 毫秒；无时区值按配置契约视为 UTC。"""
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return int(aware.timestamp() * 1000)
+
+
+def _day_period(value: datetime) -> str:
+    hour = value.hour
+    if hour < 6:
+        return "MIDNIGHT"
+    if hour < 8:
+        return "MORNING"
+    if hour < 12:
+        return "FORENOON"
+    if hour < 14:
+        return "NOON"
+    if hour < 18:
+        return "AFTERNOON"
+    return "NIGHT"
+
+
 def _time_field_values(stamps: Sequence[datetime], position: int,
-                       ts: str) -> dict[str, object]:
+                       ts: str, payload: object) -> dict[str, object]:
     """一帧的语义词表四值（裁决·语义词表四值 / 序内间隔口径）。
 
     间隔按**本序列相邻成员**计——交叉会话夹入的外序列帧与噪音帧本就占用其间墙钟，
@@ -1203,10 +1375,21 @@ def _time_field_values(stamps: Sequence[datetime], position: int,
     previous = (current - stamps[position - 1]).total_seconds() if position else 0.0
     following = ((stamps[position + 1] - current).total_seconds()
                  if position + 1 < len(stamps) else 0.0)
+    timestamp_ms = _epoch_ms(current)
+    duration_ms = 0
+    if isinstance(payload, dict):
+        candidate = payload.get("duration")
+        if isinstance(candidate, (int, float)) and not isinstance(candidate, bool):
+            duration_ms = max(0, int(candidate))
     return {"ts": ts,
+            "ts_ms": timestamp_ms,
+            "end_ts_ms": timestamp_ms + duration_ms,
             "gap_prev_s": round(previous, 6),
             "gap_next_s": round(following, 6),
-            "elapsed_s": round((current - stamps[0]).total_seconds(), 6)}
+            "elapsed_s": round((current - stamps[0]).total_seconds(), 6),
+            "day_period": _day_period(current),
+            "workday_type": ("PUBLIC_WORKDAY" if current.weekday() < 5
+                             else "PUBLIC_HOLIDAY")}
 
 
 def backfill_time_fields(sessions: list[list[_StreamSlot]],
@@ -1237,7 +1420,7 @@ def backfill_time_fields(sessions: list[list[_StreamSlot]],
             bindings = views[slot.truth["frame_class"]].time_fields
             if not bindings:
                 continue
-            values = _time_field_values(stamps, position, slot.ts)
+            values = _time_field_values(stamps, position, slot.ts, slot.payload)
             for field, semantic in bindings.items():
                 slot.payload[field] = values[semantic]
 
@@ -1308,6 +1491,8 @@ def assemble_stream(sessions: list[list[_StreamSlot]],
             generator: dict = {"llm": plan.llm, "style": plan.style_name}
             if plan.tier_rank is not None:      # v1.14 裁决·档位标识三点落位其一
                 generator["tier_rank"] = plan.tier_rank
+            if plan.time_profile_name is not None:
+                generator["time_profile"] = plan.time_profile_name
             members.setdefault(slot.owner, []).append(Record(
                 id=rec_id, modality="text", text=_payload_text(slot.payload),
                 raw=row, ui_tree=None, image=None,
@@ -1564,6 +1749,21 @@ class GenerateStage:
                           .frame_classes)
         return tuple(c for c in classes if c.name in composition), True
 
+    @staticmethod
+    def _scheduled_instruction(base: str, plan: SequencePlan) -> str:
+        """把定稿的语义 Profile 与精确时间槽注入蓝图和逐帧实现提示。"""
+        if plan.schedule_start is None or plan.schedule_end is None:
+            return base
+        start = plan.schedule_start.isoformat(timespec="seconds")
+        end = plan.schedule_end.isoformat(timespec="seconds")
+        return (f"{base.rstrip()}\n\n"
+                f"【本序列时间 Profile：{plan.time_profile_name}】\n"
+                f"计划时间槽：[{start}, {end})。所有自然语言时间、路线方向、POI、"
+                f"通勤状态和截图 Caption 必须符合该时间槽；不要描述槽外时段。\n"
+                f"{(plan.time_profile_instruction or '').strip()}\n"
+                f"帧时间字段会由程序在生成后机械回填；内容语义必须按上述 Profile "
+                f"生成，不能根据占位时间戳另作推断。")
+
     async def _stream_plan_call(self, plan: SequencePlan,
                                 ctx: "RunContext") -> list[tuple[str, str]] | None:
         """蓝图调用（一序列一次；§10.14 模板 + plan_schema 内部待遇）。
@@ -1579,8 +1779,9 @@ class GenerateStage:
         cfg = self._cfg
         gen_c = cfg.class_views[plan.class_name].generate
         classes, cover_all = self._plan_tier_face(plan)
+        instruction = self._scheduled_instruction(gen_c.instruction, plan)
         system_text, user_text = render_plan_prompt_texts(
-            gen_c.instruction, classes, plan.class_name, plan.length,
+            instruction, classes, plan.class_name, plan.length,
             cover_all=cover_all)
         schema = _plan_schema([c.name for c in classes], plan.length,
                               cover_all=cover_all)
@@ -1646,6 +1847,7 @@ class GenerateStage:
         :returns: 逐帧内容列表；None = 序列作废。
         """
         gen_c = self._cfg.class_views[plan.class_name].generate
+        instruction = self._scheduled_instruction(gen_c.instruction, plan)
         schemas, contracts = self._realize_step_faces(steps)
         bucket = bucket_key(plan.llm, plan.style_name, plan.class_name)
 
@@ -1658,7 +1860,7 @@ class GenerateStage:
             """
             start, end = span
             system_text, user_text = render_realize_prompt_texts(
-                gen_c.instruction, plan.style_prompt, steps[start:end],
+                instruction, plan.style_prompt, steps[start:end],
                 contracts[start:end])
             schema = _realize_schema(schemas[start:end])
             ctx.metrics.count(f"generate.buckets.{bucket}.calls")

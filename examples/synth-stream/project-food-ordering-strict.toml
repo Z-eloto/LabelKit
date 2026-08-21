@@ -1,6 +1,6 @@
 # project-food-ordering-strict.toml - 点餐、外卖、到店点单、自提场景时间流生成
 # 每帧包含 event + accessor 所需的扁平字段；app_usage 在每个序列中必然出现。
-# event/accessor 严格递增需在导出时启用 export_stream_views.py --calibrate-timestamps。
+# Profile 时间轴会在生成阶段保证帧起点与 duration 严格衔接；导出校准仅作兼容兜底。
 schema_version = 1
 
 [run]
@@ -34,7 +34,7 @@ noise_instruction = """
 生成与点餐、外卖、自提和到店就餐无关的干扰输入，例如查看天气、浏览新闻或短暂切换应用。
 长度 5–15 字，内容自然，但不能包含餐品、商家、下单、配送、取餐或支付等关键信息。
 """
-duplicates = 1
+duplicates = 0
 frame_gap_s = [5, 60]
 ts_start = "2026-01-05T11:00:00+08:00"
 
@@ -82,6 +82,26 @@ instruction = """
 """
 sequences = 10
 len_range = [5, 6]
+
+[[class.food_order.generate.time_profiles]]
+name = "lunch_order"
+weight = 1
+start = "11:00"
+end = "13:30"
+instruction = """
+本序列固定为午餐点单。所有通知、剪贴板与 Caption 只能描述上午临近中午、午餐或中午
+取餐/配送，不能出现早餐、下午茶或晚餐表述；商家、餐品、履约方式和订单状态保持一致。
+"""
+
+[[class.food_order.generate.time_profiles]]
+name = "dinner_order"
+weight = 1
+start = "17:30"
+end = "20:30"
+instruction = """
+本序列固定为晚餐点单。所有通知、剪贴板与 Caption 只能描述傍晚、晚餐或晚上取餐/配送，
+不能出现早餐或午餐表述；商家、餐品、履约方式和订单状态保持一致。
+"""
 
 [class.food_order.annotate]
 instruction = """
@@ -166,7 +186,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "notificationEvent"},
-    "messageTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "messageTime": {"type": "integer"},
     "content": {"type": "string", "minLength": 1},
     "appName": {"type": "string", "minLength": 1},
     "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
@@ -193,7 +213,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "pasteBoardEvent"},
-    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "timestamp": {"type": "integer"},
     "content": {"type": "string", "minLength": 1},
     "sourceApp": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]}
   },
@@ -220,8 +240,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "companionMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "caption": {"type": "string", "minLength": 1},
     "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
     "status": {"type": "string", "enum": ["Init", "Finish"]}
@@ -244,8 +264,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "screenMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "caption": {"type": "string", "minLength": 1},
     "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
     "status": {"type": "string", "enum": ["Init", "Finish"]}
@@ -273,16 +293,36 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "appUsageEvent"},
-    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "timestamp": {"type": "integer"},
     "bundleName": {"type": "string", "enum": ["com.sankuai.hmeituan", "com.meituan.takeaway", "me.ele.eleme", "com.yumc.kfc.superapp", "com.mcdonalds.cma.hm", "com.tencent.mm", "com.alipay.mobile.client", "com.unionpay.hmos.wallet"]},
     "state": {"type": "string", "enum": ["IN", "OUT"]},
-    "startTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "startTime": {"type": "integer"},
     "duration": {"type": "integer", "minimum": 1000, "description": "使用时长（毫秒）"}
   },
   "required": ["dataName", "timestamp", "bundleName", "state", "startTime", "duration"],
   "additionalProperties": false
 }
 """
+
+# 时间字段由生成后的 Profile 时间轴机械回填。
+[frame.class.notification.generate.time_fields]
+messageTime = "ts_ms"
+timestamp = "ts_ms"
+
+[frame.class.paste_board.generate.time_fields]
+timestamp = "ts_ms"
+
+[frame.class.companion_memory.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.screen_memory.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.app_usage.generate.time_fields]
+timestamp = "ts_ms"
+startTime = "ts_ms"
 
 [quality]
 enabled = true

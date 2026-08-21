@@ -939,9 +939,13 @@ def _check_frame_family(ctx: _LoadCtx, products: _Products) -> None:
 # 值 = 该词要求绑定属性字面声明的 JSON 类型(ts 是 ISO 串, 其余是 round(ts 差秒, 6))。
 _TIME_FIELD_TERMS: dict[str, str] = {
     "ts": "string",           # 本帧已铺时间戳(ISO 串; 重发帧承源值)
+    "ts_ms": "integer",       # 本帧已铺时间戳(Unix epoch 毫秒)
+    "end_ts_ms": "integer",   # ts_ms + 同一载荷的 duration(毫秒)
     "gap_prev_s": "number",   # 与本序列上一帧的间隔秒(首帧 0.0)
     "gap_next_s": "number",   # 与本序列下一帧的间隔秒(末帧 0.0)
     "elapsed_s": "number",    # 距本序列首帧秒(首帧 0.0)
+    "day_period": "string",   # 按本帧本地小时机械派生的公共时段枚举
+    "workday_type": "string", # 周一至周五/周末机械派生的工作日枚举
 }
 
 # v1.14(裁决·微秒地板): 帧间隔下界的分辨率地板——isoformat 精度与 round(·, 6) 的下界。
@@ -969,6 +973,7 @@ def _check_generate_stream(col: _Collector, fp: str, gs: GenerateStreamConfig,
     _stream_form_packing(col, fp, gs, v)
     _stream_form_weaving(col, fp, gs, v)
     _check_tier_table(col, fp, gs.tiers, v)      # v1.14 档位簇
+    _check_time_profiles(col, fp, gs, v)
     _check_time_fields(col, fp, v)               # v1.14 绑定簇
 
 
@@ -1182,6 +1187,54 @@ def _stream_form_packing(col: _Collector, fp: str, gs: GenerateStreamConfig,
                   f"{_fmt(gs.frame_gap_s[1])}")
 
 
+def _check_time_profiles(col: _Collector, fp: str, gs: GenerateStreamConfig,
+                         v: SimpleNamespace) -> None:
+    """校验可选的生成前日内调度面。
+
+    调度序列保持独立会话，禁止噪音和重发，保证一个 Profile 的语义窗口不会在交织阶段
+    被另一条序列打散。窗口还必须容纳最坏帧数下的最小帧间隔与每个帧的一秒 duration。
+    """
+    active = [(name, view) for name, view in v.class_views.items()
+              if view.generate.sequences > 0]
+    scheduled = [(name, view) for name, view in active
+                 if view.generate.time_profiles]
+    if not scheduled:
+        return
+    missing = [name for name, view in active if not view.generate.time_profiles]
+    for name in missing:
+        col.error(f"{fp}:[class.{name}.generate].time_profiles: required because another "
+                  f"participating sequence class enables generation-time scheduling - all "
+                  f"participating classes must be schedulable on the same time axis")
+    if gs.sessions != v.seq_total:
+        col.error(f"{fp}:[generate.stream].sessions: time_profiles require one independent "
+                  f"session per planned sequence, expected {v.seq_total}, got {gs.sessions}")
+    if gs.noise_ratio != 0:
+        col.error(f"{fp}:[generate.stream].noise_ratio: time_profiles require 0 so an "
+                  f"unscheduled noise frame cannot break a semantic time window")
+    if gs.duplicates != 0:
+        col.error(f"{fp}:[generate.stream].duplicates: time_profiles require 0 because a "
+                  f"re-sent sequence has no independent semantic time window")
+    for name, view in scheduled:
+        profiles = view.generate.time_profiles
+        ordered = sorted(profiles, key=lambda profile: profile.start_minute)
+        for previous, current in zip(ordered, ordered[1:]):
+            if current.start_minute < previous.end_minute:
+                col.error(f"{fp}:[class.{name}.generate].time_profiles: windows must not "
+                          f"overlap, got {previous.name!r} ending after {current.name!r} starts")
+        minimum_s = view.generate.len_range[1] * (1.0 + gs.frame_gap_s[0])
+        for profile in profiles:
+            span_s = (profile.end_minute - profile.start_minute) * 60
+            # 最保守地假设该类全部序列都落入同一个 Profile；实际按权重配额得到的
+            # 单序列时间槽只会更宽。
+            slot_span_s = span_s / view.generate.sequences
+            if slot_span_s <= minimum_s:
+                col.error(f"{fp}:[class.{name}.generate].time_profiles: profile "
+                          f"{profile.name!r} window is too short for len_range upper bound "
+                          f"{view.generate.len_range[1]} and frame_gap_s lower bound "
+                          f"{gs.frame_gap_s[0]:g}; expected each sequence slot > "
+                          f"{minimum_s:g}s, conservative slot is {slot_span_s:g}s")
+
+
 def _stream_form_weaving(col: _Collector, fp: str, gs: GenerateStreamConfig,
                          v: SimpleNamespace) -> None:
     """织造上限与铺设契约约束。
@@ -1369,6 +1422,16 @@ def _check_tiers_parked(ctx: _LoadCtx) -> None:
                       f"class table")
 
 
+def _check_time_profiles_parked(ctx: _LoadCtx) -> None:
+    """``time_profiles`` 只在时间流生成形态中有执行语义。"""
+    for cname, sections in (ctx.p.class_raw or {}).items():
+        generate = sections.get("generate") if isinstance(sections, dict) else None
+        if isinstance(generate, dict) and "time_profiles" in generate:
+            ctx.col.error(f"{ctx.fp}:[class.{cname}.generate].time_profiles: only legal in "
+                          f"the time-stream generation form "
+                          f"([generate.stream].enabled = true)")
+
+
 # ── v1.14 时间字段绑定面(SPEC-generation-tiers §3.1 绑定表三行) ───────────────
 
 
@@ -1438,6 +1501,13 @@ def _check_binding_pairs(col: _Collector, loc: str, bindings: dict, props: dict)
                       f"type array, a missing type and an indirect declaration through "
                       f"$ref or a combining keyword all count as a mismatch), got "
                       f"{_fmt(declared)}")
+        elif term == "end_ts_ms":
+            duration_prop = props.get("duration")
+            duration_type = (duration_prop.get("type")
+                             if isinstance(duration_prop, dict) else None)
+            if duration_type not in ("integer", "number"):
+                col.error(f"{loc}.{key}: end_ts_ms requires a top-level numeric duration "
+                          f"property in milliseconds")
         else:
             _warn_binding_extra_keywords(col, loc, key, prop)
 
@@ -1490,6 +1560,7 @@ def _check_generate_stream_form(ctx: _LoadCtx, products: _Products) -> tuple[int
     p = ctx.p
     if not p.generate_stream.enabled:
         _check_tiers_parked(ctx)        # v1.14 档位表前提(形态关闭侧的唯一一条)
+        _check_time_profiles_parked(ctx)
         return seq_total, len_max
     _check_generate_stream(ctx.col, ctx.fp, p.generate_stream, SimpleNamespace(
         mode=ctx.mode, modality=ctx.modality, generate=p.generate,

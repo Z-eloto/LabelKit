@@ -33,7 +33,7 @@ noise_instruction = """
 生成与办公地打卡无关的干扰输入，例如查看天气、浏览新闻或短暂切换应用。
 长度 5–15 字，内容自然，但不能包含到岗、离岗、考勤或打卡等关键信息。
 """
-duplicates = 1
+duplicates = 0
 frame_gap_s = [5, 60]
 ts_start = "2026-01-05T08:00:00+08:00"
 
@@ -90,8 +90,7 @@ description = "用户到岗、离岗或在办公地点完成上班/下班考勤�
 [class.check_in.generate]
 instruction = """
 生成一段完整、连贯的办公地考勤打卡序列。场景是用户到岗后完成上班打卡，或离岗前完成
-下班打卡。每个序列包含 app_usage、POI、通勤阶段、当天工作日与时间语义、同伴记忆和
-屏幕记忆帧。每个序列从以下闭集中选择一个办公 App，
+下班打卡；具体帧类组成由本序列 tier 决定。每个序列从以下闭集中选择一个办公 App，
 并保证该序列所有相关帧的应用与 bundleName 一致：钉钉(com.dingtalk.hmos)、
 飞书(com.ss.feishu)、企业微信(com.tencent.wework.hmos)、
 浙政钉(com.alibaba.taurushmos.zhejiang)、政务微信(com.tencent.weworklocal.hmos)。
@@ -100,6 +99,30 @@ instruction = """
 """
 sequences = 10
 len_range = [7, 10]
+
+[[class.check_in.generate.time_profiles]]
+name = "start_work"
+weight = 1
+start = "07:30"
+end = "09:30"
+instruction = """
+本序列固定为工作日上午到岗并完成上班打卡，checkInType 语义必须是 start，办公地点
+只能是 COMPANY 或 RESEARCH_INSTITUTE。所有 Caption 只能描述早晨到岗、进入办公地、
+上班打卡成功，不能描述下班或离岗。commute_period 只有一帧时用 ARRIVE_COMPANY；
+有两帧及以上时按 LEAVE_HOME、ARRIVE_COMPANY 排列。POI 表示进入办公地点。
+"""
+
+[[class.check_in.generate.time_profiles]]
+name = "end_work"
+weight = 1
+start = "17:30"
+end = "19:30"
+instruction = """
+本序列固定为工作日傍晚完成下班打卡并离岗，checkInType 语义必须是 end，办公地点
+只能是 COMPANY 或 RESEARCH_INSTITUTE。所有 Caption 只能描述下班打卡成功、离开
+办公地或准备回家，不能描述早晨上班。commute_period 只有一帧时用 LEAVE_COMPANY；
+有两帧及以上时按 LEAVE_COMPANY、ARRIVE_HOME 排列。POI 表示离开办公地点。
+"""
 
 [class.check_in.annotate]
 instruction = """
@@ -206,8 +229,8 @@ schema_inline = """
     "poiName": {"type": "string", "minLength": 1, "description": "开集地点名称，对应示例源字段 column1；生成提示中的地点仅为样例"},
     "longitude": {"type": "number", "minimum": -180, "maximum": 180, "description": "地点经度，对应示例源字段 column5"},
     "latitude": {"type": "number", "minimum": -90, "maximum": 90, "description": "地点纬度，对应示例源字段 column4"},
-    "startTime": {"type": "integer", "description": "进入地点的13位毫秒时间戳，对应 inTimestamp"},
-    "endTime": {"type": "integer", "description": "离开地点的13位毫秒时间戳，对应 outTimestamp，必须晚于 startTime"},
+    "startTime": {"type": "integer"},
+    "endTime": {"type": "integer"},
     "duration": {"type": "integer", "minimum": 1000, "description": "停留时长（毫秒），等于 endTime-startTime；源 residenceTimeInSeconds 使用秒"}
   },
   "required": ["dataName", "poiType", "poiName", "longitude", "latitude", "startTime", "endTime", "duration"],
@@ -235,7 +258,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "commutePeriodEvent", "description": "规范化帧名；源 GoToWorkCommute/GetOffWorkCommute 仅用于判断方向"},
-    "timestamp": {"type": "integer", "description": "13位毫秒事件时间；离开事件对应源 inTimestamp，到达事件对应源 outTimestamp"},
+    "timestamp": {"type": "integer"},
     "periodType": {"type": "string", "enum": ["LEAVE_HOME", "ARRIVE_COMPANY", "LEAVE_COMPANY", "ARRIVE_HOME"], "description": "通勤状态转换；上班为 LEAVE_HOME/ARRIVE_COMPANY，下班为 LEAVE_COMPANY/ARRIVE_HOME"}
   },
   "required": ["dataName", "timestamp", "periodType"],
@@ -264,8 +287,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "companionMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "entityId": {"type": "string"},
     "pageId": {"type": "string"},
     "caption": {"type": "string"},
@@ -298,8 +321,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "screenMemoryEvent"},
-    "createTime": {"type": "integer", "description": "13位毫秒时间戳"},
-    "updateTime": {"type": "integer", "description": "13位毫秒时间戳"},
+    "createTime": {"type": "integer"},
+    "updateTime": {"type": "integer"},
     "entityId": {"type": "string"},
     "pageId": {"type": "string"},
     "caption": {"type": "string"},
@@ -331,7 +354,7 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "appUsageEvent"},
-    "timestamp": {"type": "integer", "description": "13位毫秒时间戳"},
+    "timestamp": {"type": "integer"},
     "bundleName": {"type": "string", "enum": ["com.dingtalk.hmos", "com.ss.feishu", "com.tencent.wework.hmos", "com.alibaba.taurushmos.zhejiang", "com.tencent.weworklocal.hmos"]},
     "state": {"type": "string", "enum": ["IN", "OUT"]},
     "startTime": {"type": "integer"},
@@ -359,8 +382,8 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "publicTimePeriodEvent", "description": "规范化公共时段事件名"},
-    "timestamp": {"type": "integer", "description": "13位毫秒事件或状态观测时间，对应示例外层 timestamp"},
-    "publicTimePeriodType": {"type": "string", "enum": ["MIDNIGHT", "MORNING", "FORENOON", "NOON", "AFTERNOON", "NIGHT"], "description": "一天中的公共时段，对应源 Time_PublicTimePeriod[].publicTimePeriodType"}
+    "timestamp": {"type": "integer"},
+    "publicTimePeriodType": {"type": "string"}
   },
   "required": ["dataName", "timestamp", "publicTimePeriodType"],
   "additionalProperties": false
@@ -383,13 +406,41 @@ schema_inline = """
   "type": "object",
   "properties": {
     "dataName": {"type": "string", "const": "publicWorkDayEvent", "description": "规范化公共工作日事件名"},
-    "timestamp": {"type": "integer", "description": "公共工作日状态开始生效的13位毫秒时间戳，对应源 Time_PublicWorkDay[].inTimestamp"},
-    "publicWorkDayType": {"type": "string", "enum": ["PUBLIC_WORKDAY", "PUBLIC_HOLIDAY"], "description": "公共工作日类型，对应源 Time_PublicWorkDay[].publicWorkDayType"}
+    "timestamp": {"type": "integer"},
+    "publicWorkDayType": {"type": "string"}
   },
   "required": ["dataName", "timestamp", "publicWorkDayType"],
   "additionalProperties": false
 }
 """
+
+# 时间字段统一由最终 Profile 时间轴机械回填。
+[frame.class.poi.generate.time_fields]
+startTime = "ts_ms"
+endTime = "end_ts_ms"
+
+[frame.class.commute_period.generate.time_fields]
+timestamp = "ts_ms"
+
+[frame.class.companion_memory_info.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.screen_memory_info.generate.time_fields]
+createTime = "ts_ms"
+updateTime = "ts_ms"
+
+[frame.class.app_usage.generate.time_fields]
+timestamp = "ts_ms"
+startTime = "ts_ms"
+
+[frame.class.public_time_period.generate.time_fields]
+timestamp = "ts_ms"
+publicTimePeriodType = "day_period"
+
+[frame.class.public_workday.generate.time_fields]
+timestamp = "ts_ms"
+publicWorkDayType = "workday_type"
 
 [quality]
 enabled = true
