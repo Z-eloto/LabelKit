@@ -13,6 +13,11 @@ v1.14 档位面（SPEC-generation-tiers §3.2/§3.7）另覆盖：档位映射�
 档内子集表与覆盖句冻结文本、truth 键序三形态（任务/噪音/重发）、``ref.generator``
 三键、逐档 planned/produced 落账。
 
+v1.15 按类档位表（SPEC-per-class-tiers §3.2/§3.6）再覆盖：混合形态（一类声明 / 一类
+回落）的计划期 rank 映射与 ``--limit`` 逐类分块、蓝图取本类生效表的档内子集、truth 与
+``ref.generator`` 逐行与本类生效表一致、逐档计数器的类段键、按类配分仍零抽签消费、
+同 seed 双跑逐字节一致，以及"按类表逐字段等于全局表 ⇒ 与全部缺省等价"的退化面。
+
 v1.14 时间字段面（SPEC-generation-tiers §3.3/§3.7）再覆盖：缩减 Schema 派生
 （properties 删键 / required 差集 / 其余关键字原样 / 不污染 M1 冻结产物 / 两个面
 同源）、回填算术（首末边界 0.0、序内相邻口径含交叉夹帧、微秒精度、同 seed 双跑
@@ -25,16 +30,20 @@ import asyncio
 import copy
 import hashlib
 import json
+import logging
 import random
 from dataclasses import replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+
+import pytest
 
 from labelkit.common.config.model import (
     AnnotateConfig,
     ClassSpec,
     ClassView,
     ClassifyConfig,
+    CorrelationSpec,
     ConsoleConfig,
     DedupConfig,
     ExtractConfig,
@@ -51,6 +60,8 @@ from labelkit.common.config.model import (
     Rubric,
     RunConfig,
     SegmentConfig,
+    SequenceRuleSpec,
+    SequenceWindowSpec,
     StitchConfig,
     StreamConfig,
     TierSpec,
@@ -59,8 +70,9 @@ from labelkit.common.config.model import (
     VerifyConfig,
     apportion_tiers,
 )
-from labelkit.common.errors import ContextOverflowError, SchemaViolation
+from labelkit.common.errors import ContextOverflowError, InternalError, SchemaViolation
 from labelkit.common.contracts.types import Usage
+from labelkit.common.runtime.sequence_planner import PlannerConfigError, PlannerInternalError
 from labelkit.operators.generate import (
     GenerateStage,
     NoiseCallPlan,
@@ -74,6 +86,7 @@ from labelkit.operators.generate import (
     plan_stream,
     predraw_llm_style,
     render_plan_prompt_texts,
+    render_realize_prompt_texts,
     stream_artifact_path,
     tier_rank_for_ordinal,
     weave_stream,
@@ -129,13 +142,18 @@ def mk_cfg(*, quotas: dict[str, int] | None = None, sessions: int = 2,
            limit: int | None = None, generate: GenerateConfig | None = None,
            len_range=(2, 3), session_max_len: int = 200,
            llm_profiles=None, tiers: tuple[TierSpec, ...] = (),
+           class_tiers: dict | None = None,
            frame_classes: tuple[str, ...] = FRAME_TABLE,
-           frame_schema=FRAME_SCHEMA, time_fields=None) -> ResolvedConfig:
+           frame_schema=FRAME_SCHEMA, time_fields=None,
+           rules: tuple[SequenceRuleSpec, ...] = (),
+           windows: tuple[SequenceWindowSpec, ...] = ()) -> ResolvedConfig:
     quotas = quotas if quotas is not None else {"booking": 2, "smalltalk": 1}
     base_generate = generate or GenerateConfig(enabled=True, num_per_call=2)
+    # v1.15: class_tiers 逐类给 ClassView.tiers（缺席 = None = 回落全局 tiers）
     views = {name: replace(mk_view(name, sequences=n, len_range=len_range),
                            generate=replace(base_generate, instruction=f"生成{name}",
-                                            sequences=n, len_range=len_range))
+                                            sequences=n, len_range=len_range),
+                           tiers=(class_tiers or {}).get(name))
              for name, n in quotas.items()}
     return ResolvedConfig(
         tool=ToolConfig(), console=ConsoleConfig(),
@@ -170,7 +188,8 @@ def mk_cfg(*, quotas: dict[str, int] | None = None, sessions: int = 2,
             enabled=True, sessions=sessions, noise_ratio=noise_ratio,
             noise_instruction="生成噪音" if noise_ratio > 0 else "",
             duplicates=duplicates, frame_gap_s=(5.0, 60.0),
-            ts_start="2026-01-01T09:00:00+08:00", tiers=tiers),
+            ts_start="2026-01-01T09:00:00+08:00", tiers=tiers,
+            rules=rules, windows=windows),
     )
 
 
@@ -215,9 +234,13 @@ class StreamEngine:
             if self.plan_no in self.fail_plans:
                 raise SchemaViolation(["/steps: 枚举违规"], "{}")
             length = props["steps"]["minItems"]
-            names = props["steps"]["items"]["properties"]["frame_class"]["enum"]
-            steps = [{"frame_class": names[i % len(names)],
-                      "brief": f"step {self.plan_no}-{i}"} for i in range(length)]
+            item_props = props["steps"]["items"]["properties"]
+            if "frame_class" in item_props:
+                names = item_props["frame_class"]["enum"]
+                steps = [{"frame_class": names[i % len(names)],
+                          "brief": f"step {self.plan_no}-{i}"} for i in range(length)]
+            else:
+                steps = [{"brief": f"step {self.plan_no}-{i}"} for i in range(length)]
             return {"steps": steps}, Usage(1, 1), 1, "m"
         if "frames" in props:
             self.realize_no += 1
@@ -696,6 +719,7 @@ def test_sample_validator_scraps_whole_sequence(monkeypatch):
     product, _, metrics = run_stream(cfg)
     assert len(product.envelopes) == 1            # 首序列整条作废（拒绝采样语义）
     assert metrics.counters["generate.stream.validator_scrapped"] == 1
+    assert metrics.counters["generate.stream.sample_validator_scrapped"] == 1
     assert metrics.counters[
         "generate.buckets.booking×default×null.rejected_by_validator"] == 1
     assert generate_module is not None
@@ -796,6 +820,9 @@ def test_real_product_flows_through_real_emitter(tmp_path):
 # ── v1.14 档位面：映射、零抽签消费、蓝图双向硬约束、标识三点、逐档计数 ────────
 
 TIERS = mk_tiers((2, FRAME_TABLE), (1, ("task_request",)))
+# v1.15 按类表：构成与权重都与全局表反向（3 条配额按 (1, 2) 配分 = 1 + 2，
+# 对照全局表的 (2, 1) 配分 = 2 + 1）——混合形态下两类的分块必然可区分。
+OWN_TIERS = mk_tiers((1, ("task_request",)), (2, FRAME_TABLE))
 
 
 def test_sequence_plan_tier_rank_defaults_to_none():
@@ -880,18 +907,27 @@ def test_tier_mapping_commutes_with_limit_and_cuts_from_the_top_rank():
 
 def test_tier_apportionment_consumes_no_rng():
     """配分零抽签（顺序表原文不动）：同 seed 下有无档位表，长度与 (llm, style)
-    预抽流逐字节一致，且 rng 消费位置相同。"""
+    预抽流逐字节一致，且 rng 消费位置相同。v1.15：按类表在场时同款成立——生效表
+    查找与配分都是纯查表，档位赋值仍是①与②之间的零消费步。"""
     plain = mk_cfg(quotas={"booking": 3, "smalltalk": 2}, sessions=3, noise_ratio=0.4)
     tiered = replace(plain, generate_stream=replace(plain.generate_stream, tiers=TIERS))
+    per_class = mk_cfg(quotas={"booking": 3, "smalltalk": 2}, sessions=3, noise_ratio=0.4,
+                       tiers=TIERS, class_tiers={"booking": OWN_TIERS})
     rng_plain = random.Random("0:0:generate")
     rng_tiered = random.Random("0:0:generate")
+    rng_class = random.Random("0:0:generate")
     a, b = plan_stream(plain, rng_plain), plan_stream(tiered, rng_tiered)
-    assert [(p.length, p.llm, p.style_name, p.style_prompt) for p in a.sequences] == \
-           [(p.length, p.llm, p.style_name, p.style_prompt) for p in b.sequences]
-    assert (a.noise_target, a.noise_plans) == (b.noise_target, b.noise_plans)
-    assert rng_plain.getstate() == rng_tiered.getstate()
+    c = plan_stream(per_class, rng_class)
+    draws = [[(p.length, p.llm, p.style_name, p.style_prompt) for p in plan.sequences]
+             for plan in (a, b, c)]
+    assert draws[0] == draws[1] == draws[2]
+    assert (a.noise_target, a.noise_plans) == (b.noise_target, b.noise_plans) \
+           == (c.noise_target, c.noise_plans)
+    assert rng_plain.getstate() == rng_tiered.getstate() == rng_class.getstate()
     assert [p.tier_rank for p in a.sequences] == [None] * len(a.sequences)
     assert [p.tier_rank for p in b.sequences] == [1, 1, 2, 1, 2]
+    # booking 改吃按类表 (1, 2) 分块 ⇒ 前三位变 [1, 2, 2]，smalltalk 两位不变
+    assert [p.tier_rank for p in c.sequences] == [1, 2, 2, 1, 2]
 
 
 def test_tier_face_only_adds_keys_to_the_v113_artifact_bytes():
@@ -1038,18 +1074,151 @@ def test_generator_tier_rank_flows_out_through_the_real_emitter(tmp_path):
 
 def test_tier_planned_and_produced_counters_land_per_rank():
     """逐档计数：planned 在计划期落账（含被作废的序列），produced 口径 = 最终进链
-    的幸存序列；档位表缺省 ⇒ 整族计数器不在场。"""
+    的幸存序列；档位表缺省 ⇒ 整族计数器不在场。v1.15（裁决·计数器键按类重冻结）：
+    键恒带类段 generate.stream.tiers.<类>.<档>.*，M6 只喂这一族（禁双写）。"""
     cfg = mk_cfg(quotas={"booking": 3}, sessions=2, tiers=TIERS)
     _, _, metrics = run_stream(cfg, engine=StreamEngine(fail_plans={3}))
-    assert metrics.counters["generate.stream.tiers.1.planned"] == 2
-    assert metrics.counters["generate.stream.tiers.2.planned"] == 1
+    assert metrics.counters["generate.stream.tiers.booking.1.planned"] == 2
+    assert metrics.counters["generate.stream.tiers.booking.2.planned"] == 1
     assert metrics.counters["generate.stream.sequences.booking.planned"] == 3
-    assert metrics.counters["generate.stream.tiers.1.produced"] == 2
+    assert metrics.counters["generate.stream.tiers.booking.1.produced"] == 2
     # 第三条（tier_rank 2）蓝图作废 ⇒ 该档 produced 不落账（报表侧按声明表零基铺开）
-    assert "generate.stream.tiers.2.produced" not in metrics.counters
+    assert "generate.stream.tiers.booking.2.produced" not in metrics.counters
+    # 单一喂数纪律：绝不同时喂 v1.14 的无类段键
+    assert "generate.stream.tiers.1.planned" not in metrics.counters
     _, _, plain = run_stream(mk_cfg(quotas={"booking": 3}, sessions=2))
     assert not [key for key in plain.counters
                 if key.startswith("generate.stream.tiers.")]
+
+
+# ── v1.15 按类档位表：混合形态的取表点（SPEC-per-class-tiers §3.2）───────────
+
+def mixed_cfg(**kwargs) -> ResolvedConfig:
+    """混合形态：booking 用按类表、smalltalk 回落全局表（各 3 条配额）。"""
+    kwargs.setdefault("quotas", {"booking": 3, "smalltalk": 3})
+    kwargs.setdefault("sessions", 4)
+    return mk_cfg(tiers=TIERS, class_tiers={"booking": OWN_TIERS}, **kwargs)
+
+
+def test_mixed_form_maps_each_class_off_its_own_effective_table():
+    """计划期逐类查本类生效表：声明类吃按类表 (1, 2) 分块，未声明类吃全局表
+    (2, 1) 分块——同一 rank 值在两类间无可比性（裁决·rank 类内身份）。"""
+    plan = plan_stream(mixed_cfg(), random.Random("0:0:generate"))
+    ranks = {(p.class_name, p.ordinal): p.tier_rank for p in plan.sequences}
+    assert [ranks[("booking", o)] for o in range(3)] == [1, 2, 2]
+    assert [ranks[("smalltalk", o)] for o in range(3)] == [1, 1, 2]
+
+
+def test_limit_truncation_cuts_from_each_class_top_rank_side():
+    """--limit 仍是配额层前缀截断、映射仍吃全量配额 ⇒ 交换律逐类原文成立；
+    类内序数按**本类**生效表分块，故从本类最高 rank 一侧截起。"""
+    cfg = mixed_cfg()
+    full = [(p.class_name, p.ordinal, p.tier_rank)
+            for p in plan_stream(cfg, random.Random("0:0:generate")).sequences]
+    for limit in (2, 4):
+        limited = [(p.class_name, p.ordinal, p.tier_rank) for p in
+                   plan_stream(replace(cfg, limit=limit),
+                               random.Random("0:0:generate")).sequences]
+        assert limited == full[:limit]
+    # booking 截到 2 条 ⇒ 只剩 rank 1 的一条与 rank 2 的头一条（尾部先掉）
+    assert [r for _, _, r in full[:2]] == [1, 2]
+
+
+def plan_call_of(engine: StreamEngine, cname: str):
+    """按 user 行里的序列类名取该类的蓝图调用（gather 序无关）。"""
+    for _, prompt, schema in engine.calls:
+        if ("steps" in schema["properties"]
+                and f"「{cname}」" in prompt.messages[1].parts[0].text):
+            return prompt, schema
+    raise AssertionError(f"no blueprint call for {cname}")
+
+
+def test_blueprint_reads_the_effective_table_of_the_sequence_class():
+    """蓝图取档 = 本类生效表[tier_rank - 1]：[帧类表]、enum 与 contains 覆盖分支
+    全部落在**本类**档内构成上，两类互不串档。"""
+    cfg = mk_cfg(quotas={"booking": 1, "smalltalk": 1}, sessions=2, len_range=(2, 2),
+                 frame_classes=("task_request", "followup", "confirmation"),
+                 tiers=mk_tiers((1, ("task_request", "confirmation"))),
+                 class_tiers={"booking": mk_tiers((1, ("task_request", "followup")))})
+    _, engine, _ = run_stream(cfg)
+    prompt_b, schema_b = plan_call_of(engine, "booking")
+    system_b = prompt_b.messages[0].parts[0].text
+    assert "[帧类表]\ntask_request: d\nfollowup: d\n" in system_b
+    assert "confirmation" not in system_b
+    assert (schema_b["properties"]["steps"]["items"]["properties"]["frame_class"]["enum"]
+            == ["task_request", "followup"])
+    _, schema_s = plan_call_of(engine, "smalltalk")     # 回落全局表的那一档
+    assert (schema_s["properties"]["steps"]["items"]["properties"]["frame_class"]["enum"]
+            == ["task_request", "confirmation"])
+    assert [branch["contains"]["properties"]["frame_class"]["const"]
+            for branch in schema_s["properties"]["steps"]["allOf"]] == [
+        "task_request", "confirmation"]
+
+
+def test_truth_and_generator_follow_the_class_effective_table_row_by_row():
+    """标识三点的值来源改了、装配面没改：逐行 truth.tier_rank 与成员
+    ref.generator.tier_rank 都等于**本行序列类**生效表内的档序数。"""
+    product, _, _ = run_stream(mixed_cfg())
+    tables = {"booking": OWN_TIERS, "smalltalk": TIERS}
+    rows = parse_lines(product)
+    for truth in (row["truth"] for row in rows):
+        if truth["noise"]:
+            assert truth["tier_rank"] is None       # 噪音帧不属任何序列
+            continue
+        assert truth["tier_rank"] == tier_rank_for_ordinal(
+            3, tables[truth["sequence_class"]], truth["sequence"])
+    # 两类的分块确实不同（本用例对"误用全局表"是可判的）
+    assert sorted({(t["sequence"], t["tier_rank"]) for t in
+                   (row["truth"] for row in rows)
+                   if t["sequence_class"] == "booking"}) == [(0, 1), (1, 2), (2, 2)]
+    for envelope in product.envelopes:
+        truth = envelope.record.members[0].raw["truth"]
+        expected = tier_rank_for_ordinal(3, tables[truth["sequence_class"]],
+                                         truth["sequence"])
+        assert all(m.ref.generator["tier_rank"] == expected
+                   for m in envelope.record.members)
+
+
+def test_per_class_counters_land_under_the_class_segment():
+    """裁决·计数器键按类重冻结：逐档 planned/produced 按 <类>.<档> 落账，
+    两类的同 rank 计数各自独立（平面报表的跨类求和由编排器负责）。"""
+    _, _, metrics = run_stream(mixed_cfg())
+    tiered = {k: v for k, v in metrics.counters.items()
+              if k.startswith("generate.stream.tiers.")}
+    assert tiered == {"generate.stream.tiers.booking.1.planned": 1,
+                      "generate.stream.tiers.booking.2.planned": 2,
+                      "generate.stream.tiers.booking.1.produced": 1,
+                      "generate.stream.tiers.booking.2.produced": 2,
+                      "generate.stream.tiers.smalltalk.1.planned": 2,
+                      "generate.stream.tiers.smalltalk.2.planned": 1,
+                      "generate.stream.tiers.smalltalk.1.produced": 2,
+                      "generate.stream.tiers.smalltalk.2.produced": 1}
+
+
+def test_per_class_tiers_double_run_is_byte_identical():
+    """同 seed 双跑逐字节一致（按类表在场）：生效表查找与配分都零 rng，交织期
+    抽签流不受按类化扰动。"""
+    cfg = mixed_cfg(noise_ratio=0.3, duplicates=1)
+    first, _, _ = run_stream(cfg)
+    second, _, _ = run_stream(cfg)
+    assert first.artifact_lines == second.artifact_lines
+    assert [e.record.id for e in first.envelopes] == [e.record.id
+                                                      for e in second.envelopes]
+
+
+def test_declaring_the_global_table_per_class_equals_falling_back():
+    """裁决·表级原子覆盖的退化面：按类表逐字段等于全局表 ⇒ 与全部缺省（v1.14
+    路径）的工件、信封 id 与计数器逐字节等价。"""
+    plain = mk_cfg(quotas={"booking": 2, "smalltalk": 1}, sessions=2,
+                   noise_ratio=0.3, duplicates=1, tiers=TIERS)
+    explicit = mk_cfg(quotas={"booking": 2, "smalltalk": 1}, sessions=2,
+                      noise_ratio=0.3, duplicates=1, tiers=TIERS,
+                      class_tiers={"booking": TIERS, "smalltalk": TIERS})
+    a, _, metrics_a = run_stream(plain)
+    b, _, metrics_b = run_stream(explicit)
+    assert a.artifact_lines == b.artifact_lines
+    assert [e.record.id for e in a.envelopes] == [e.record.id for e in b.envelopes]
+    assert metrics_a.counters == metrics_b.counters
 
 
 # ── v1.14 时间字段面：缩减 Schema 派生 ──────────────────────────────────────
@@ -1107,7 +1276,22 @@ def test_realize_faces_take_the_same_reduced_product_for_schema_and_contract():
     assert contracts[0] == json.dumps(schemas[0], ensure_ascii=False,
                                       separators=(", ", ": "))
     assert not [field for field in TIME_FIELDS if field in contracts[0]]
-    assert schemas[1] == {"type": "string"} and contracts[1] == "自由文本一段"
+    assert schemas[1] == {"type": "string"}
+    assert contracts[1] == "自由文本一段"
+
+
+def test_realize_prompt_requires_plain_frame_to_be_a_json_string():
+    """联合 realize prompt 明确禁止无 Schema 帧使用对象包装。"""
+    cfg = mk_timed_cfg(quotas={"booking": 1}, sessions=1)
+    steps = [("task_request", "请求要点"), ("followup", "补充要点")]
+    stage = GenerateStage(cfg)
+    _, contracts = stage._realize_step_faces(steps, constrained=True)
+    system, user = render_realize_prompt_texts(
+        "生成booking", None, steps, contracts, "none")
+    expected = '生成followup\n内容契约：JSON 字符串（如 "..."），不得用对象包裹'
+    assert contracts[1] == expected
+    assert f"第 2 帧（followup）须符合：{expected}" in system
+    assert user.endswith("请实现全部 2 帧内容。")
 
 
 def test_dispatched_realize_schema_carries_no_bound_field():
@@ -1448,3 +1632,247 @@ def test_hooks_and_the_similarity_filter_see_pre_backfill_payloads(monkeypatch):
                 if [field for field in TIME_FIELDS if field in text]]
     # 对照面：同一批载荷回填之后才带绑定字段
     assert [line for line in product.artifact_lines if '"duration"' in line]
+
+
+# ── v1.16 联合 planner、sampled brief 与序列验证─────────────────────
+
+JOINT_RULES = (
+    SequenceRuleSpec(template="init", frame_class="task_request"),
+    SequenceRuleSpec(template="exactly", frame_class="task_request", count=1),
+    SequenceRuleSpec(template="chain_response", source="task_request",
+                     target="followup", time_s=(10.0, 100.0)),
+    SequenceRuleSpec(template="exactly", frame_class="followup", count=1),
+    SequenceRuleSpec(template="end", frame_class="followup"),
+)
+
+
+def test_joint_path_freezes_word_prompts_noise_and_duplicate_before_calls():
+    """联合路径从 sampled brief 到 artifact 完整贯通且不回退到旧编织器。"""
+    cfg = mk_cfg(
+        quotas={"booking": 1}, sessions=1, len_range=(2, 2),
+        noise_ratio=0.5, duplicates=1, rules=JOINT_RULES,
+    )
+    product, engine, metrics = run_stream(cfg)
+    assert len(product.envelopes) == 1
+    assert metrics.counters["generate.stream.noise_frames"] == 1
+    assert metrics.counters["generate.stream.duplicates"] == 1
+    rows = parse_lines(product)
+    primary = [row for row in rows if not row["truth"]["noise"]
+               and "duplicate_of" not in row["truth"]]
+    duplicate = [row for row in rows if "duplicate_of" in row["truth"]]
+    assert [row["truth"]["frame_class"] for row in primary] == [
+        "task_request", "followup"]
+    delta = (datetime.fromisoformat(primary[1]["ts"])
+             - datetime.fromisoformat(primary[0]["ts"])).total_seconds()
+    assert 10 <= delta < 100
+    assert [row["text"] for row in duplicate] == [row["text"] for row in primary]
+    assert datetime.fromisoformat(duplicate[0]["ts"]) > datetime.fromisoformat(rows[-3]["ts"])
+    brief_call = next(call for call in engine.calls
+                      if "steps" in call[2]["properties"])
+    realize_call = next(call for call in engine.calls
+                        if "frames" in call[2]["properties"])
+    item_props = brief_call[2]["properties"]["steps"]["items"]["properties"]
+    assert set(item_props) == {"brief"}
+    brief_system = brief_call[1].messages[0].parts[0].text
+    realize_system = realize_call[1].messages[0].parts[0].text
+    assert "[固定帧类词]" in brief_system and "time_s=[10.0, 100.0)" in brief_system
+    assert "time_s=[10.0, 100.0)" in realize_system
+    assert "生成task_request" in realize_system and "生成followup" in realize_system
+
+
+def test_m6_maps_planner_config_error_without_payload(monkeypatch, caplog):
+    """M1 已通过后 planner 配置异常按内部错误映射且不泄露详情。"""
+    import labelkit.common.runtime.sequence_planner as planner
+
+    def fail(*_args, **_kwargs):
+        raise PlannerConfigError("payload must not reach the M6 boundary")
+
+    monkeypatch.setattr(planner, "select_feasible_plan", fail)
+    with caplog.at_level(logging.ERROR, logger="labelkit.generate"):
+        with pytest.raises(InternalError) as caught:
+            plan_stream(mk_cfg(quotas={"booking": 1}, sessions=1,
+                               len_range=(2, 2), rules=JOINT_RULES),
+                        random.Random("planner-config"))
+    assert "payload must not reach" not in str(caught.value)
+    assert "payload must not reach" not in caplog.text
+    assert "time-stream planner" in caplog.text
+
+
+def test_m6_maps_planner_internal_error_without_payload(monkeypatch, caplog):
+    """M6 将 planner 内部异常映射为 common InternalError 且不泄露详情。"""
+    import labelkit.common.runtime.sequence_planner as planner
+
+    def fail(*_args, **_kwargs):
+        raise PlannerInternalError("payload must not reach the M6 boundary")
+
+    monkeypatch.setattr(planner, "select_feasible_plan", fail)
+    with caplog.at_level(logging.ERROR, logger="labelkit.generate"):
+        with pytest.raises(InternalError) as caught:
+            plan_stream(mk_cfg(quotas={"booking": 1}, sessions=1,
+                               len_range=(2, 2), rules=JOINT_RULES),
+                        random.Random("planner-internal"))
+    assert "payload must not reach" not in str(caught.value)
+    assert "payload must not reach" not in caplog.text
+    assert "time-stream planner failed an internal invariant at M6 boundary" in caplog.text
+
+
+def test_sequence_validator_runs_without_rules_or_windows(monkeypatch):
+    """sequence_validator 独立生效，不得被 planner 开关误伤。"""
+    seen = []
+
+    def hook(value):
+        seen.append(value)
+        value.frames[0].payload["mutated"] = True
+        return ["reject sequence"]
+
+    monkeypatch.setattr("labelkit.common.extensions.hooks.resolve_hook",
+                        lambda _ref: hook)
+    generate = GenerateConfig(enabled=True, num_per_call=2,
+                              sequence_validator="mod:sequence")
+    cfg = mk_cfg(quotas={"booking": 1}, sessions=1, len_range=(2, 2),
+                 generate=generate)
+    product, engine, metrics = run_stream(cfg)
+    assert product.envelopes == [] and product.artifact_lines == []
+    assert seen and [frame.position for frame in seen[0].frames] == [0, 1]
+    assert metrics.counters["generate.stream.sequence_validator_scrapped"] == 1
+    assert metrics.counters["generate.stream.validator_scrapped"] == 1
+    plan_schema = next(call[2] for call in engine.calls
+                       if "steps" in call[2]["properties"])
+    assert "frame_class" in plan_schema["properties"]["steps"]["items"]["properties"]
+
+
+def test_sequence_validator_exception_log_is_value_free(monkeypatch, caplog):
+    """序列 hook 异常只记录类型，异常文本、payload 与 prompt 均不得进入日志。"""
+    payload_marker = "PAYLOAD_SECRET_7f2c"
+    prompt_marker = "PROMPT_SECRET_91ab"
+
+    def hook(_value):
+        raise RuntimeError(f"{payload_marker} {prompt_marker}")
+
+    monkeypatch.setattr("labelkit.common.extensions.hooks.resolve_hook",
+                        lambda _ref: hook)
+    generate = GenerateConfig(enabled=True, num_per_call=2,
+                              sequence_validator="mod:sequence")
+    cfg = mk_cfg(quotas={"booking": 1}, sessions=1, len_range=(2, 2),
+                 generate=generate)
+    with caplog.at_level(logging.WARNING, logger="labelkit.generate"):
+        product, _, _ = run_stream(cfg)
+    assert product.envelopes == []
+    assert payload_marker not in caplog.text
+    assert prompt_marker not in caplog.text
+    assert "type=RuntimeError" in caplog.text
+
+
+@pytest.mark.parametrize("first_failure", (
+    "none", "sample_validator", "correlation", "temporal", "sequence_validator",
+))
+def test_stream_validation_gates_stop_at_first_failure_and_preserve_order(
+        monkeypatch, first_failure):
+    """逐门观察 realize、样本、correlation、time、sequence hook 与相似度顺序。"""
+    import labelkit.common.runtime.declare as declare
+    import labelkit.operators.generate as generate_module
+
+    events: list[str] = []
+    sample_ref = "sample:validator"
+    sequence_ref = "sequence:validator"
+
+    def sample_hook(_text):
+        events.append("sample_validator")
+        return ["sample failure"] if first_failure == "sample_validator" else []
+
+    def sequence_hook(_value):
+        events.append("sequence_validator")
+        return ["sequence failure"] if first_failure == "sequence_validator" else []
+
+    def resolve(ref):
+        return sample_hook if ref == sample_ref else sequence_hook
+
+    monkeypatch.setattr("labelkit.common.extensions.hooks.resolve_hook", resolve)
+    equal = declare.canonical_equal
+    time_match = declare._time_match
+
+    def observe_equal(left, right):
+        events.append("correlation")
+        return False if first_failure == "correlation" else equal(left, right)
+
+    def observe_time(rule, pair, timestamps):
+        if timestamps is not None:
+            events.append("temporal")
+        return False if first_failure == "temporal" else time_match(rule, pair, timestamps)
+
+    monkeypatch.setattr(declare, "canonical_equal", observe_equal)
+    monkeypatch.setattr(declare, "_time_match", observe_time)
+    probe_and_add = generate_module.SimilarityFilter.probe_and_add
+
+    def observe_similarity(self, text):
+        del text
+        events.append("similarity")
+        return probe_and_add(self, "unique sequence probe")
+
+    monkeypatch.setattr(generate_module.SimilarityFilter, "probe_and_add", observe_similarity)
+    engine = StreamEngine()
+    complete = engine.complete_validated
+
+    async def observe_realize(profile, prompt, schema=None, *, scope):
+        if schema is not None and "frames" in schema["properties"]:
+            events.append("realize_schema")
+        return await complete(profile, prompt, schema=schema, scope=scope)
+
+    monkeypatch.setattr(engine, "complete_validated", observe_realize)
+    correlation = CorrelationSpec(operator="equal", source_field="id", target_field="id")
+    rules = (
+        SequenceRuleSpec(template="init", frame_class="task_request"),
+        SequenceRuleSpec(template="exactly", frame_class="task_request", count=1),
+        SequenceRuleSpec(template="exactly", frame_class="followup", count=1),
+        SequenceRuleSpec(template="chain_response", source="task_request",
+                         target="followup", time_s=(5.0, 10.0),
+                         correlation=correlation),
+    )
+    generate = GenerateConfig(enabled=True, num_per_call=2,
+                              sample_validator=sample_ref,
+                              sequence_validator=sequence_ref)
+    cfg = mk_cfg(quotas={"booking": 1}, sessions=1, len_range=(2, 2),
+                 generate=generate, rules=rules)
+    run_stream(cfg, engine=engine)
+    expected = ["realize_schema"]
+    if first_failure == "sample_validator":
+        expected.append("sample_validator")
+    else:
+        expected.extend(("sample_validator", "sample_validator"))
+        if first_failure == "correlation":
+            expected.append("correlation")
+        else:
+            expected.append("correlation")
+            if first_failure == "temporal":
+                expected.append("temporal")
+            else:
+                expected.append("temporal")
+                expected.append("sequence_validator")
+                if first_failure == "none":
+                    expected.append("similarity")
+    assert events == expected
+
+
+def test_rule_failure_counters_distinguish_correlation_and_time():
+    """M6 把 C0→Ce→Ct 的首错精确分流到两个条件计数器。"""
+    correlation = CorrelationSpec(
+        operator="equal", source_field="id", target_field="id")
+    rule = SequenceRuleSpec(
+        template="chain_response", source="task_request", target="followup",
+        time_s=(10.0, 20.0), correlation=correlation)
+    cfg = mk_cfg(quotas={"booking": 1}, sessions=1, len_range=(2, 2),
+                 rules=(rule,))
+    stage = GenerateStage(cfg)
+    plan = SequencePlan(
+        index=0, class_name="booking", ordinal=0, length=2, llm="default",
+        style_name=None, style_prompt=None,
+        frame_classes=("task_request", "followup"),
+        timestamps_us=(0, 15_000_000),
+    )
+    context = SimpleNamespace(metrics=Metrics(), batch_no=0)
+    assert not stage._stream_rules_valid(plan, ({"id": "a"}, {"id": "b"}), context)
+    assert context.metrics.counters["generate.stream.correlation_scrapped"] == 1
+    context = SimpleNamespace(metrics=Metrics(), batch_no=0)
+    late = replace(plan, timestamps_us=(0, 25_000_000))
+    assert not stage._stream_rules_valid(late, ({"id": "a"}, {"id": "a"}), context)
+    assert context.metrics.counters["generate.stream.temporal_scrapped"] == 1

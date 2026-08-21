@@ -42,6 +42,14 @@
 | 31 | z.ai glm-5.2 接受 `allOf`/`contains` 作强制工具 input_schema | 实测记录 | ✅ 已确认（2026-08-18，L0 透传钉板） |
 | 32 | 工件重放判重档位的两分支现在都有实测：`exact` 与 `near_text` | 实测记录（第 27 条续） | 已记录（两分支并列叙述） |
 | 33 | v1.13 集成首例在真端点约 8 跑中偶发红一次 | 锐边记录（同第 6、26 条根因家族） | ⏸ 不改测试（处置理由见条目） |
+| 34 | v1.15 计数器键按类重冻结把 v1.14 集成第四例留成陈旧断言 | 测试适配（非偏差） | ✅ 已适配（2026-08-19） |
+| 35 | v1.15 验收当日 DeepSeek 端帧实现违约率抬头：6 跑中 5 跑各作废 1 条 | 实测记录（同第 26、33 条根因家族） | ⏸ 数据侧缓解（按设计处置） |
+| 36 | z.ai 账号周/月额度耗尽 ⇒ 两例 L0 透传钉板暂时无法执行 | 环境记录（非代码问题） | ✅ 已闭合（2026-08-20） |
+| 37 | v1.16 最小规则集 DeepSeek 单例通过 | 实测记录 | ✅ 已确认（1 passed，5.82s） |
+| 38 | v1.16 synth-stream 首跑：thinking 默认开启与 4096 输出预算导致全量作废 | 实测记录 | ⛔ failed-closed 诊断 |
+| 39 | v1.16 synth-stream 显式关闭 thinking 后的自由文本帧类型违约 | 实测记录 | ⛔ failed-closed 诊断 |
+| 40 | v1.16 synth-stream 规则生成成功验收 | 实测记录 | ✅ 已确认（2026-08-20） |
+| 41 | v1.16 synth-stream 正式 process replay 成功验收 | 实测记录 | ✅ 已确认（2026-08-20） |
 
 ## P1 — 实现与规格的偏差
 
@@ -326,11 +334,14 @@ inode**，先启动进程 rename 交付的「主输出」实为后进程内容�
 
 ### 22. DeepSeek anthropic 路由响应默认携带 thinking 内容块 —— 📌 已记录（M9 天然兼容，2026-08-12）
 
-**现象**：`https://api.deepseek.com/anthropic` + `deepseek-v4-flash` 的文本调用响应 `content` 数组默认携带 `type=="thinking"` 内容块（模型默认开思考，无请求侧关闭开关），`type=="text"` 块随后。两次真实探针一致；温度 0 可用、usage 在场。
+**现象**：`https://api.deepseek.com/anthropic` + `deepseek-v4-flash` 的文本调用响应 `content` 数组默认携带 `type=="thinking"` 内容块（当时请求未显式携带关闭字段，默认开启），`type=="text"` 块随后。两次真实探针一致；温度 0 可用、usage 在场。
 
-**后果**：零适配成本——M9 anthropic 解析器只收集 `type=="text"` 块拼接文本（`llm_client.py` 的响应解析循环，约 :451-456），thinking 块天然跳过，JSON 干净落在 text 块、确定性修复层无感。但该兼容性是**解析器按块类型过滤**这一实现选择的副产品：若未来改为「拼接全部内容块」，thinking 文本会污染确定性修复层解析面——记录在案防回归。
+**当日解析观测**：M9 anthropic 解析器只收集 `type=="text"` 块拼接文本（`llm_client.py` 的响应解析循环，约 :451-456），thinking 块天然跳过，JSON 干净落在 text 块、确定性修复层无感。但该兼容性是**解析器按块类型过滤**这一实现选择的副产品：若未来改为「拼接全部内容块」，thinking 文本会污染确定性修复层解析面——记录在案防回归。
 
 **处置**：`examples/mix/config.toml` 以该端点为默认 profile，文件头注记录本结论；无代码改动面。
+
+**v1.16 更新（见 §38–§40）**：profile 现在可显式设置 `thinking = "disabled"`。解析器继续按块类型跳过
+`thinking`、只收集 `text`，这是兼容已有响应形状的解析措施，不是关闭 thinking，也不是输出预算或截断问题的解决方案。
 
 ### 23. 该路由不支持图像内容块 —— ✅ 已适配（examples/mix 双 profile 混合接入，2026-08-12 需求方修订后更新）
 
@@ -448,13 +459,129 @@ inode**，先启动进程 rename 交付的「主输出」实为后进程内容�
 
 **处置（不改测试）与理由**：① 该断言正是这条锐边的**探针**——放宽为「允许作废」会让真正的回归（例如缩减 Schema 派生出错导致的系统性违约）无声通过，探针价值高于偶发红的成本；② 作废语义本身无缺陷：配额是**尝试配额**，作废序列不产 failed 记录、不进交织、守恒恒等式照常成立（第 26 条已确立）；③ 温度是两难旋钮，两端都有代价（低温 ⇒ 同类序列近重被相似度过滤淘汰，高温 ⇒ 帧实现违约），工具侧无案；④ 集成套件本就是**手动执行**的真端点面（离线套件从不触网），偶发红重跑即可，不进 CI 门禁。记录于此以免后来者把它当作新缺陷重新调查。
 
-### 测试留痕（v1.14）
+### 34. v1.15 计数器键按类重冻结把 v1.14 集成第四例留成陈旧断言 —— ✅ 已适配（2026-08-19）
+
+**现象**：v1.15 生产代码与离线套件全绿（2005 passed）之后首次执行集成套件，v1.14 的档位例（`test_generate_stream_tiers_real_deepseek_composition_and_counters`）红在第一条断言：`ctx.metrics.counters.get("generate.stream.tiers.1.planned")` 取回 `None`，实际落账的键是 `generate.stream.tiers.ticket_booking.1.planned`。
+
+**根因**：裁决·计数器键按类重冻结把 M6 的喂数键从 `generate.stream.tiers.<rank>.*` 改成恒带类段的 `generate.stream.tiers.<class>.<rank>.*`（平面形报表改由编排器跨类求和装配）。离线套件里读这族键的用例随 Wave 1a 一并改了，**集成套件不在离线跑范围内**（`-m 'not integration'`），于是这条陈旧断言活到了 Wave 2。
+
+**处置**：按新键形修正该例的三处断言（单序列类 ⇒ 类段恒为 `ticket_booking`），并在其 docstring 里点明「M6 恒喂类段键、平面形由编排器跨类求和、嵌套形由新增的第七例钉住」。**不是产品缺陷**——报表的平面形数值与 v1.14 逐字节相等这一点由 `test_generate_stream_report_tiers_flat_form_sums_across_classes` 等离线用例钉住，本条只是测试面的滞后。教训归档：**改动被计数器键族时，集成套件与离线套件要一起搜**（`rg 'generate\.stream\.tiers'` 覆盖 `tests/` 全域，而不只是 `-m 'not integration'` 跑得到的那部分）。
+
+### 35. v1.15 验收当日 DeepSeek 端帧实现违约率抬头：6 跑中 5 跑各作废 1 条 —— ⏸ 数据侧缓解（第 26、33 条根因家族）
+
+**现象**：`examples/synth-stream` 验收当日连跑 6 次，其中 5 次各有 1 条序列在帧实现阶段作废（`realize_failures = 1`，`plan_failures` 恒 0），第 6 次干净（6/6）。作废落点不固定：`ticket_booking` 序数 2 两次、`smart_home` 序数 1 两次、`smart_home` 序数 2 一次。开 `trace`（channels `schema` + `llm`、content `full`）取到违约形态是 `schema.repair {"resolved_at": "rejected", "violations": ["/frames/0: type"]}`——该位契约要结构化帧对象，模型给了一句纯文本；修复环耗尽 ⇒ 整条作废。
+
+**根因与非根因**：根因与第 26 条同源（无 L0 端点 + `temperature = 0.9` + 逐位类型契约）。**明确排除按类档位表**：① 作废在两个序列类、三个不同序数上都出现过，不是「购票类二档那张按类表」的专属；② 违约位是 `/frames/0`（首帧类型），与档位构成无关——`plan_failures` 恒 0 说明蓝图侧的 `enum` + `contains` 覆盖约束全程无违约（第 30 条结论继续成立）；③ 干净那一跑的逐行构成对账 6/6 全通过（构成恰等，按类表与全局表各自生效）。当日违约率高于 v1.14 验收日，属服务端非确定性的日间波动，工具侧无案。
+
+**处置**：验收取干净那一跑作为手册主样本，把带 1 条作废的一跑保留为 `out-run1/`——它恰好是 `produced < planned` 在**类嵌套** `tiers` 下的真实读法样本（`ticket_booking` 的 `"2": {"planned": 2, "produced": 1}` 一眼定位到「确认直达」那一档）。手册第 27 章 27.5/27.9/27.10 均已声明「逐次运行掉 0～1 条是常态」，不把 6/6 写成保证。
+
+**同日集成侧的同族观测**：验收末轮全套复跑时，v1.15 按类档位例与 v1.13 基础例各遇一次**两条计划序列同时作废**（同样是 `call=realize kind=schema_violation violations=1`），触发两例共用的「至少一条幸存」哨兵断言（第 26 条先例，配额取 2 即为此容忍设计）；原样复跑五个 DeepSeek 例即全绿。这说明当日波动的幅度足以偶发吃掉两条，**容忍设计的下限是「不为 0」而非「必有幸存」**——集成例遇红先原样复跑一次再判，别当代码回归。
+
+### 36. z.ai 账号周/月额度耗尽 ⇒ 两例 L0 透传钉板暂时无法执行 —— ✅ 已闭合（环境记录，2026-08-20 复跑双绿）
+
+**现象**：v1.15 集成套件执行时，两个 z.ai 例（`test_realize_schema_prefixitems_passthrough_zai_structured_output`、`test_plan_schema_cover_all_passthrough_zai_structured_output`）稳定红在 `ProviderRetryableError: retries exhausted (2): HTTP 429 … [1310][Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-08-20 15:44:45]`。间隔重试两次，形态一致。
+
+**根因与处置**：**账号侧额度耗尽，不是代码问题**——两例是 v1.13/v1.14 的站立假设钉板（`prefixItems` 与 `allOf`/`contains` 随 L0 原样透传给供应商强制工具，第 31 条），v1.15 **零触碰**它们（既不改两个 Schema 构造器，也不改 L0 上行路径），SPEC-per-class-tiers §3.6 亦明记「z.ai `cover_all` L0 透传例保绿回归、无需新增」。工具侧的表现完全符合设计：429 走全抖动退避重试 → 预算耗尽 → `ProviderRetryableError`（`retry_after` 缺省时不做无界 park）。五个 DeepSeek 例（含 v1.15 新增的按类档位例）全绿，v1.15 的行为面因此有完整真端点覆盖。待额度重置后复跑这两例即可闭合。
+
+**闭合（2026-08-20）**：额度按期重置（15:44:45）后当日复跑两例，`2 passed in 17.40s`——`prefixItems` 与 `allOf`/`contains` 的 L0 原样透传钉板恢复在位，v1.15 集成面补齐为 **7/7**。与预判一致：纯账号额度问题，零代码改动、零重试外动作。
+
+### 测试留痕（v1.15）
 
 | 套件 | 数量 | 备注 |
 |---|---|---|
-| 离线套件 | 1980 passed | v1.13 基线 1884；新增覆盖分布在 `test_loader_generate_stream.py`（M1 约束两簇逐条正反例）、`test_generate_stream.py`（映射与 `--limit` 交换律、蓝图渲染、缩减 Schema 派生、回填算术、truth 键序与条件在场、双关字节等价）、`test_config.py`（`tiers`/`time_fields` 默认值）、`test_schema_engine.py`（`cover_all` 形态与 `ALLOWED_KEYWORDS` 扩三词、`contains` 渲染分支）、`test_orchestrator.py`（`tiers` 形状/键序/零额在场/缺省不在场四向）、`tests/common/config/`（`apportion_tiers` 整数配分性质，随函数落点归属） |
-| 集成套件（真端点） | 6 passed | v1.13 三例 + v1.14 三例：DeepSeek 档位一例（逐行 `members[]` 帧类集合 ≡ 档声明构成、`tiers` 计数落账）、DeepSeek 时间字段一例（解析工件断言 `duration` = 序内相邻成员 ts 差，重发行除外）、z.ai glm-5.2 `cover_all` L0 透传一例（第 31 条）。偶发红锐边见第 33 条 |
-| `examples/synth-stream` 真跑 | exit 0 | `counts.generated = emitted = 6`、`failed`/`dropped_*` 全 0；`generate.stream = {sessions 5, crossed_sessions 1, 两类各 planned 3/produced 3, tiers {"1": 4/4, "2": 2/2}, frames 23, noise_frames 2, duplicates 1, plan_calls 6, realize_calls 6, noise_calls 1, 三项 failures 0}`；`run.artifact.lines = 29`、`llm_usage.default.calls = 51`；构成恰等逐行对账通过、`duration` = 序内相邻 ts 差逐帧对账通过、重发行载荷与源行字节一致 |
-| 保留运行 `out-run1/` | exit 0 | 尝试配额语义的真实样本：2 条序列在帧实现作废（`realize_failures = 2`）⇒ `tiers {"1": 4/3, "2": 2/1}`、`crossed_sessions 0`、工件 23 行（第 30 条） |
-| 工件重放（process + segment） | exit 0 | 29 帧 → 6 会话 → 6 episodes、`absorbed 27`、`dropped_noise 2`、`dropped_dup 1`（**`exact`**，第 32 条）、`emitted 5`、`failed 0` |
-| dry-run golden | 八个**字节不动** | 两机制零调用数变化 ⇒ `estimate_run` 零改动，含示例扩展后的 `dryrun-synth-stream.txt`（`generate_calls=13`、`classify_calls=0`、`total=49`） |
+| 离线套件 | 2007 passed | v1.14 基线 1980；开发期新增 25 例分布在 `test_loader_generate_stream.py`（rule 61 三子款正反例、白名单第七键、逐表身份连续性与跨类同构成、配额对吃生效表、并集化校验域、零额类结构校验不豁免、定位串带类名）、`test_generate_stream.py`（混合形态映射、`--limit` 逐类分块、蓝图取生效表档内子集、按类配分零 rng 钉板、同 seed 双跑字节一致、全缺省与 v1.14 等价）、`test_orchestrator.py`（平面形跨类求和、嵌套形双层键序、零配额类 0/0、混合触发谓词）、`test_config.py`（`ClassView.tiers` 默认 None、`effective_tiers` 三态）；检视闭环再 +2 例（rule 61 ②/③ 互斥只报空表错、形状错按未声明落库不叠报——同落 `test_loader_generate_stream.py`） |
+| 集成套件（真端点） | 7 passed | DeepSeek 五例全绿——v1.13 两例 + v1.14 两例 + **v1.15 新增按类档位一例**（混合形态：`ticket_booking` 自带单档表 `{task_request, confirmation}`、`smart_home` 回落全局两档表；断言逐行构成恰等吃**本行类**生效表、类段计数器落账、经生产装配器取到的嵌套 `tiers` 逐键对账含零额档 `0/0`、`generator.tier_rank` 与工件 `truth.tier_rank` 逐行一致）。v1.14 第四例的陈旧键断言按第 34 条修正；末轮复跑时两个 DeepSeek 例各遇一次全作废哨兵红、原样复跑即全绿（第 35 条同日观测）。两个 z.ai L0 透传例 2026-08-19 因账号额度耗尽被阻（第 36 条，非代码问题），2026-08-20 额度重置后复跑双绿闭合（`2 passed in 17.40s`）⇒ 集成面 **7/7** |
+| `examples/synth-stream` 真跑 | exit 0 | `counts.generated = emitted = 6`、`failed`/`dropped_*` 全 0；`generate.stream = {sessions 5, crossed_sessions 1, 两类各 planned 3/produced 3, tiers 类嵌套形 {ticket_booking: {"1": 1/1, "2": 2/2}, smart_home: {"1": 2/2, "2": 1/1}}, frames 23, noise_frames 2, duplicates 1, plan_calls 6, realize_calls 6, noise_calls 1, 三项 failures 0}`；`run.artifact.lines = 29`、`llm_usage.default.calls = 50`、`timing.wall_s = 70.311`；**逐行反推对账通过**——6 条序列的 `members[]` 帧类集合恰等于**本行序列类生效表**该 rank 的构成（购票二档两条均为 `{task_request, confirmation}`、智能家居二档一条为全三类，同 rank 两种构成），工件 29 行 `truth.tier_rank` 与 `generator.tier_rank` 逐行一致 |
+| 保留运行 `out-run1/` | exit 0 | `produced < planned` 在类嵌套 `tiers` 下的真实样本：1 条序列在帧实现作废（第 35 条）⇒ `ticket_booking {"1": 1/1, "2": 2/1}`、`smart_home {"1": 2/2, "2": 1/1}`、`crossed_sessions 0`、工件 25 行 |
+| 工件重放（process + segment） | exit 0 | 29 帧 → 6 会话 → 6 episodes、`absorbed 27`、`dropped_noise 2`、`dropped_dup 1`（本跑落 `exact`；**档位随分段判决浮动，两分支皆可能**，第 27、32 条）、`emitted 5`、`failed 0`、11 次调用 / 37.7 秒；23 个成员 id 与生成侧**逐个相同**，4/5 幸存 episode 的 id 与生成侧序列 id 恰等（对不上的那条是交叉会话整会话成段，其 id 恰等于生成侧的 `session_id`） |
+| dry-run golden | 八个**字节不动** | 按类档位零调用数变化 ⇒ `estimate_run` 零改动；示例扩展后 `dryrun-synth-stream.txt` 经 `cmp` 逐字节相等（`generate_calls=13`、`classify_calls=0`、`total=49`） |
+
+## 追加条目：v1.16 规则规划与 DeepSeek 诊断（2026-08-20）
+
+### 37. 最小规则集的真实 DeepSeek 集成单例通过 —— ✅ 已确认
+
+为隔离规则规划器、类型敏感关联和半开时间约束，先运行单个真实 DeepSeek 用例，不依赖
+完整示例的五类帧和下游质量/标注调用。用例声明固定两帧 request → acknowledgement，
+`time_s = [1200, 2400)`、工作日窗口和 `subject_id` typed equal，并核对 planner 计数、
+artifact 和验证结果。
+
+实测结果：`tests/integration/test_generate_stream_llm.py` 该单例 **`1 passed in 5.82s`**。
+这是 v1.16 规则路径的最小 live pass；它不等价于完整 `examples/synth-stream` 验收。
+
+### 38. 完整示例首跑未关闭 thinking 且输出预算为 4096 —— ⛔ failed-closed 诊断
+
+第一次运行完整 `examples/synth-stream` 时，请求没有显式关闭 thinking，示例 profile 的
+`max_output_tokens` 仍为 4096。进程退出码为 0，但六条 attempt 全部作废：四条在 brief
+阶段因 `output_truncated` 作废，两条在 realize 阶段因 `schema_violation` 作废。
+
+报告与用量证据为：`generated = 0`、`emitted = 0`、artifact 行数为 0；`plan_calls = 6`、
+`realize_calls = 2`、`noise_calls = 1`，物理 LLM 请求 13 次；input tokens 6095、output
+tokens 24617，`wall_s = 92.817`。这次运行只证明失败闭环和计数语义，不能作为功能验收。
+
+处置是修改示例 profile 为显式 `thinking = "disabled"`，并把结构结果预算调到 8192。
+增加预算本身不是关闭 thinking 的替代方案；后续运行必须同时保留两个设置。
+
+### 39. 显式关闭 thinking 后自由文本帧仍被输出成 object —— ⛔ failed-closed 诊断
+
+第二次完整示例运行已经显式携带 `thinking = "disabled"`，并使用 `max_output_tokens =
+8192`。输出截断不再是主故障，但六条 realize 全部因为自由文本帧被模型输出成 object 而
+作废。trace `limit = 1` 显示 Schema repair 已执行两轮，仍未把类型修正为字符串；最终
+仍是 0 条主输出、0 条 artifact。
+
+这次结果把问题边界收窄为 DeepSeek L0-off 路径上的逐位自由文本类型服从性，而不是
+thinking 预算耗尽。它仍是 failed-closed 诊断，不是「关闭 thinking 后全量 E2E 已通过」的
+证据。需要在不改变规则契约、不增加 fallback 或 deferred 实现的前提下完成后续修复与
+重新验证。
+
+### 测试留痕（v1.16 当前阶段）
+
+| 套件 | 结果 | 结论 |
+|---|---|---|
+| v1.16 最小真实 DeepSeek 集成单例 | `1 passed in 5.82s` | 规则 planner、typed correlation、半开 time_s 的最小 live pass |
+| `examples/synth-stream` 首跑 | exit 0，但 0 输出 | failed-closed：thinking 未显式关闭，4096 造成 4 次 truncation + 2 次 realize schema violation |
+| `examples/synth-stream` 显式 disabled + 8192 | exit 0，但 0 输出 | failed-closed：6 次 realize 自由文本位输出 object，repair 两轮仍未修复 |
+
+当前不能从这三项证据推出完整示例成功，也不能把进程 exit 0 当作业务产物验收通过。
+
+### 40. v1.16 synth-stream 规则生成最终真实验收通过 —— ✅ 已确认（2026-08-20）
+
+在显式 `thinking = "disabled"`、`max_output_tokens = 8192` 的当前配置下重新运行完整
+示例，进程 exit 0。主链报告为 `counts.generated = 6`、`emitted = 5`、
+`dropped_verify = 1`、`failed = 0`；计划配额为 6，其中
+`ticket_booking = {planned: 3, produced: 3}`、`smart_home = {planned: 3, produced: 3}`。
+
+按类档位报告为：`ticket_booking` 的 rank 1 为 `1/1`、rank 2 为 `2/2`；
+`smart_home` 的 rank 1 为 `2/2`、rank 2 为 `1/1`。时间流统计为
+`sessions = 5`、`crossed_sessions = 1`、`frames = 27`、`noise_frames = 3`、
+`duplicates = 1`、`calendar_days_spanned = 8`。
+
+规划与内容计数为：`plan_calls = 6`、`realize_calls = 6`、`noise_calls = 1`；
+规则计数为 `rules.sampled = 6`、`correlation_scrapped = 0`、
+`temporal_scrapped = 0`、`sequence_validator_scrapped = 0`。工件为 34 行，
+`sha256:927e469e16df3f007f057357a267b8f8228506a5dfb279dc83bdfa1f1da672bf`。
+
+LLM 用量为 `calls = 53`、`prompt_tokens = 12173`、`completion_tokens = 4487`、
+`retries = 0`，`timing.wall_s = 35.214`。这次结果保留了 planner 规划的真实 crossing，
+不是此前作废投影后 `crossed_sessions = 0` 的历史运行。
+
+### 41. v1.16 正式 process replay 最终真实验收通过 —— ✅ 已确认（2026-08-20）
+
+使用正式 `project-replay.toml` 重放上述 34 行工件，进程 exit 0。输入侧
+`scanned = ingested = 34`，分段结果为 `episodes = 6`、`absorbed = 31`、
+`dropped_noise = 3`；流尾 duplicate 命中为 `dropped_dup = 1`，主链为
+`emitted = 5`、`failed = 0`。
+
+重放观测为 `sessions = 6`、`mean_episode_len = 5.17`、`windows = 7`。LLM 用量为
+`calls = 12`、`prompt_tokens = 4542`、`completion_tokens = 721`、`retries = 0`，
+`timing.wall_s = 5.475`。这次结果验证了正式 process 配置可以消费最终生成工件，并在
+流尾重发 session 上命中 episode-level dedup。
+
+### 测试留痕（v1.16 最终验收）
+
+| 套件 | 数量 | 备注 |
+|---|---|---|
+| 离线套件 | 2128 passed，49 deselected | 最终离线门；规则规划、时间窗口、按类档位、生成与 replay 相关用例均在本轮通过 |
+| 集成套件（真端点） | 8 passed | 最终 DeepSeek 规则生成、既有时间流/档位/按类档位和 z.ai 结构化输出钉板均通过 |
+| `examples/synth-stream` 最终真跑 | exit 0 | 生成 6、emitted 5、`dropped_verify = 1`、failed 0；sessions 5、crossed_sessions 1、frames 27、noise 3、duplicates 1；工件 34 行，SHA-256 为 `927e469e16df3f007f057357a267b8f8228506a5dfb279dc83bdfa1f1da672bf` |
+| 工件重放（process + segment） | exit 0 | 34 帧 → 6 会话、6 episodes、`absorbed = 31`、`dropped_noise = 3`、`dropped_dup = 1`、`emitted = 5`、`failed = 0`；`mean_episode_len = 5.17`、`windows = 7`、12 次调用 / 5.475 秒 |
+| dry-run golden | 八个**字节不动** | 规则面不改变既有 golden 字节；live 用量以本次 report 为准 |

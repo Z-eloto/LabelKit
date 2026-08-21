@@ -7,16 +7,31 @@ forbidden-key probes, packing consistency, the weaving caps, the parked-section
 waivers, the classify.llm reference-set waiver, the S29 empty-selector
 extension, the per-class annotate Schema surface (which is form-INDEPENDENT)
 and the frame-class generate Schema surface. Pure config logic — zero LLM.
+
+v1.14 adds the tier table and the time-field binding cluster; v1.15
+(SPEC-per-class-tiers.md §3.1) adds the per-class tier table
+[[class.<name>.generate.tiers]]: rule 61's three sub-clauses, the per-effective-
+table identity/composition checks, the per-class quota pairs and the union-scoped
+frame-class checks.
+
+v1.16 增加序列规则/窗口表、类型化 correlation、sequence_validator，以及全局/按类三态整表语义。
 """
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from labelkit.common.config import ResolvedConfig
-from labelkit.common.config.model import GenerateStreamConfig, TierSpec
-from labelkit.common.errors import ConfigError
+from labelkit.common.config.model import (
+    CorrelationSpec,
+    GenerateStreamConfig,
+    SequenceRuleSpec,
+    SequenceWindowSpec,
+    TierSpec,
+)
+from labelkit.common.errors import ConfigError, InternalError
 from tests.common.config.test_config import (  # noqa: F401 (env is a fixture)
     BASE_CONFIG,
     SCHEMA,
@@ -423,13 +438,31 @@ def test_frame_gap_structural_errors(env, value):
                 "hi] (0 < lo <= hi, seconds)")
 
 
-def test_frame_gap_upper_bound_below_session_gap(env):
+def test_frame_gap_upper_bound_is_strict_on_default_v15_path(env):
     generate = GS_GENERATE.replace("frame_gap_s = [5, 60]", "frame_gap_s = [5, 900]")
     errors = env.errors(project_text=gs_project(env, gs_body(generate=generate)))
-    has(errors, "[generate.stream].frame_gap_s: the upper bound must be < stream.gap_s (= 900")
+    has(errors, "[generate.stream].frame_gap_s: the upper bound must be < stream.gap_s")
+    generate = GS_GENERATE.replace("frame_gap_s = [5, 60]", "frame_gap_s = [5, 901]")
+    errors = env.errors(project_text=gs_project(env, gs_body(generate=generate)))
+    has(errors, "[generate.stream].frame_gap_s: the upper bound must be < stream.gap_s")
     generate = GS_GENERATE.replace("frame_gap_s = [5, 60]", "frame_gap_s = [5, 899]")
     cfg = env.load(project_text=gs_project(env, gs_body(generate=generate)))
     assert cfg.generate_stream.frame_gap_s == (5.0, 899.0)
+
+
+def test_frame_gap_upper_bound_at_session_gap_is_allowed_for_constrained_prefix(env):
+    generate = GS_GENERATE.replace("frame_gap_s = [5, 60]", "frame_gap_s = [5, 900]")
+    cfg = env.load(project_text=gs_project(env, sequence_tables_body(
+        generate=generate, rules=RULE_INIT)))
+    assert cfg.generate_stream.frame_gap_s == (5.0, 900.0)
+
+
+def test_sequence_validator_alone_keeps_default_frame_gap_boundary(env):
+    generate = GS_GENERATE.replace("frame_gap_s = [5, 60]", "frame_gap_s = [5, 900]")
+    generate = generate.replace("[generate]\nenabled = true", "[generate]\nenabled = true\n"
+                                'sequence_validator = "tests.hook_samples:sequence_ok"', 1)
+    errors = env.errors(project_text=gs_project(env, gs_body(generate=generate)))
+    has(errors, "[generate.stream].frame_gap_s: the upper bound must be < stream.gap_s")
 
 
 def test_frame_gap_defaults_when_absent(env):
@@ -672,11 +705,12 @@ def test_class_annotate_schema_keys_are_whitelisted(env):
 
 
 def test_class_generate_quota_keys_are_whitelisted(env):
+    # v1.16: rules/windows 与 tiers 一并进入按类生成白名单
     errors = env.errors(project_text=env.project(
         body=CLASSIFY_TWO + "\n[class.qa.generate]\nsequence_count = 3\n"))
     has(errors, "[class.qa.generate].sequence_count: [class.*.generate] cannot override this "
                 "key (whitelist: instruction, styles, time_profiles, num_per_record, "
-                "temperature, sequences, len_range)")
+                "temperature, sequences, len_range, tiers, rules, windows)")
 
 
 def test_forbidden_generate_key_probe_skips_classes_without_a_generate_table(env):
@@ -845,6 +879,27 @@ def test_static_precheck_silent_with_room(env, capsys):
     err = capsys.readouterr().err
     assert "[generate.stream.plan]" not in err
     assert "[generate.stream.realize]" not in err
+
+
+def test_joint_realize_precheck_allows_bounded_halving_without_correlation(env):
+    """只有无 correlation 规则时，9000 上下文仍保留 realize 对半降级。"""
+    cfg = env.load(
+        config_text=_cw(9000),
+        project_text=gs_project(env, sequence_tables_body(rules=RULE_INIT)))
+    assert isinstance(cfg, ResolvedConfig)
+
+
+def test_joint_realize_precheck_reserves_the_sampled_brief_output_for_correlation(env):
+    """有 correlation 时，完整 sampled brief 输出必须计入不可拆 realize 预算。"""
+    correlation = ('correlation = {operator = "equal", source_field = "subject_id", '
+                   'target_field = "subject_id"}')
+    rules = RULE_RESPONSE.replace('target = "followup"',
+                                  'target = "followup"\n' + correlation)
+    constrained = env.errors(
+        config_text=_cw(9000),
+        project_text=gs_project(env, sequence_tables_body(
+            rules=rules, frames=structured_correlation_frames())))
+    has(constrained, "[generate.stream.realize]: static system-side prompt parts estimated")
 
 
 # ── V13③ annotate 段的按类取值修订（3.1.4 时间流生成末段「annotate 段口径修订」）─
@@ -1162,6 +1217,575 @@ def test_frame_gap_lower_bound_has_a_microsecond_floor(env):
     assert cfg.generate_stream.frame_gap_s == (1e-06, 60.0)
 
 
+def test_frame_gap_without_representable_microsecond_is_aggregated(env):
+    """不可表示的微秒闭区间必须在 M1 聚合为 CONFIG_ERROR。"""
+    generate = GS_GENERATE.replace("frame_gap_s = [5, 60]",
+                                   "frame_gap_s = [0.0000011, 0.0000012]")
+    errors = env.errors(project_text=gs_project(env, gs_body(generate=generate)))
+    has(errors, "[generate.stream].frame_gap_s: frame_gap_s has no representable "
+                "microsecond value")
+
+
+# ── v1.16 rules/windows 配置面 ─────────────────────────────────────────────
+
+RULE_INIT = """\
+[[generate.stream.rules]]
+template = "init"
+frame_class = "task_request"
+"""
+
+RULE_RESPONSE = """\
+[[generate.stream.rules]]
+template = "response"
+source = "task_request"
+target = "followup"
+"""
+
+WINDOW_REQUEST = """\
+[[generate.stream.windows]]
+frame_class = "task_request"
+of_day = [["08:00", "11:00"], ["14:00", "17:00"]]
+"""
+
+
+def sequence_tables_body(*, rules: str = "", windows: str = "", generate: str = GS_GENERATE,
+                         frames: str = GS_FRAMES) -> str:
+    """在基础时间流配置的 generate.stream 与按类表之间插入 v1.16 表。"""
+    marker = "\n[class.ticket_booking.generate]"
+    inserted = f"\n{rules}\n{windows}" if rules or windows else ""
+    assert marker in generate
+    return gs_body(generate=generate.replace(marker, inserted + marker, 1), frames=frames)
+
+
+def structured_correlation_frames(*, target_type: str = "string",
+                                  source_required: bool = True,
+                                  bind_subject: bool = False) -> str:
+    """构造 correlation 两侧结构化生成 Schema。"""
+    source_schema = {
+        "type": "object",
+        "properties": {"subject_id": {"type": "string"},
+                        "utterance": {"type": "string"}},
+        "required": ["subject_id", "utterance"],
+        "additionalProperties": False,
+    }
+    target_schema = {
+        "type": "object",
+        "properties": {"subject_id": {"type": target_type},
+                        "utterance": {"type": "string"}},
+        "required": (["subject_id", "utterance"] if source_required
+                      else ["utterance"]),
+        "additionalProperties": False,
+    }
+    source_text = json.dumps(source_schema, ensure_ascii=False)
+    target_text = json.dumps(target_schema, ensure_ascii=False)
+    frames = GS_FRAMES.replace(
+        'instruction = "生成一条发起购票任务的用户话语"',
+        'instruction = "生成一条发起购票任务的用户话语"\n'
+        f"schema_inline = '''\n{source_text}\n'''", 1)
+    frames = frames.replace(
+        'instruction = "生成一条补充信息的用户话语"',
+        'instruction = "生成一条补充信息的用户话语"\n'
+        f"schema_inline = '''\n{target_text}\n'''", 1)
+    if bind_subject:
+        frames += ('\n[frame.class.task_request.generate.time_fields]\n'
+                   'subject_id = "ts"\n')
+    return frames
+
+
+def test_sequence_rule_and_window_tables_parse(env):
+    cfg = env.load(project_text=gs_project(env, sequence_tables_body(
+        rules=RULE_INIT + RULE_RESPONSE, windows=WINDOW_REQUEST)))
+    assert cfg.generate_stream.rules == (
+        SequenceRuleSpec(template="init", frame_class="task_request"),
+        SequenceRuleSpec(template="response", source="task_request", target="followup"),
+    )
+    assert cfg.generate_stream.windows == (
+        SequenceWindowSpec(frame_class="task_request",
+                           of_day=(("08:00", "11:00"), ("14:00", "17:00"))),
+    )
+
+
+def test_sequence_rule_window_and_correlation_unknown_keys_warn(env, capsys):
+    rule = RULE_RESPONSE.replace(
+        'target = "followup"',
+        'target = "followup"\nfuture_rule_key = true\n'
+        'correlation = {operator = "equal", source_field = "subject_id", '
+        'target_field = "subject_id", future_predicate = "x"}')
+    windows = WINDOW_REQUEST.replace('of_day =', 'future_window_key = 1\nof_day =')
+    frames = structured_correlation_frames()
+    env.load(project_text=gs_project(env, sequence_tables_body(
+        rules=rule, windows=windows, frames=frames)))
+    err = capsys.readouterr().err
+    assert "future_rule_key: unknown key" in err
+    assert "correlation.future_predicate: unknown key" in err
+    assert "future_window_key: unknown key" in err
+
+
+def test_class_rules_and_windows_have_independent_three_state_tables(env):
+    generate = GS_GENERATE + "\nrules = []\nwindows = []\n"
+    cfg = env.load(project_text=gs_project(env, sequence_tables_body(
+        generate=generate, rules=RULE_INIT, windows=WINDOW_REQUEST)))
+    view = cfg.class_views["ticket_booking"]
+    assert view.rules == () and view.windows == ()
+    assert cfg.generate_stream.rules == (
+        SequenceRuleSpec(template="init", frame_class="task_request"),)
+    assert cfg.generate_stream.windows
+
+    class_rule = """\
+[[class.ticket_booking.generate.rules]]
+template = "response"
+source = "task_request"
+target = "followup"
+"""
+    generate = GS_GENERATE + class_rule + "\n"
+    cfg = env.load(project_text=gs_project(env, sequence_tables_body(
+        generate=generate, rules=RULE_INIT, windows=WINDOW_REQUEST)))
+    view = cfg.class_views["ticket_booking"]
+    assert view.rules == (SequenceRuleSpec(template="response", source="task_request",
+                                           target="followup"),)
+    assert view.windows is None
+
+
+def test_sequence_tables_and_validator_are_parked_when_form_is_off(env):
+    body = ("[generate]\nsequence_validator = \"tests.hook_samples:ok\"\n"
+            "\n[generate.stream]\nenabled = false\n\n" + RULE_INIT + WINDOW_REQUEST)
+    errors = env.errors(project_text=env.project(body=body))
+    has(errors, "[[generate.stream.rules]]: sequence rules are only legal")
+    has(errors, "[[generate.stream.windows]]: sequence windows are only legal")
+    has(errors, "[generate].sequence_validator: sequence_validator is only legal")
+
+
+def test_sequence_validator_reference_is_resolved_in_enabled_form(env):
+    body = sequence_tables_body(rules=RULE_INIT)
+    body = body.replace("[generate]\nenabled = true", "[generate]\nenabled = true\n"
+                        "sequence_validator = \"tests.hook_samples:sequence_ok\"", 1)
+    cfg = env.load(project_text=gs_project(env, body))
+    assert cfg.generate.sequence_validator == "tests.hook_samples:sequence_ok"
+
+    bad = body.replace("tests.hook_samples:sequence_ok", "tests.hook_samples:missing_fn")
+    errors = env.errors(project_text=gs_project(env, bad))
+    has(errors, "[generate].sequence_validator: attribute 'missing_fn' not found")
+
+
+@pytest.mark.parametrize(("hook", "expected"), [
+    ("tests.hook_samples:ok", "hook must accept exactly one positional"),
+    ("tests.hook_samples:sequence_bad_return", "dry-run returned an invalid value"),
+    ("tests.hook_samples:sequence_boom", "dry-run raised RuntimeError"),
+])
+def test_sequence_validator_signature_and_dry_run_are_checked_at_startup(env, hook, expected):
+    """M1 必须以代表性输入执行单参数钩子并规范化返回值。"""
+    body = sequence_tables_body(rules=RULE_INIT)
+    body = body.replace("[generate]\nenabled = true", "[generate]\nenabled = true\n"
+                        f"sequence_validator = \"{hook}\"", 1)
+    errors = env.errors(project_text=gs_project(env, body))
+    has(errors, f"[generate].sequence_validator: {expected}")
+
+
+def test_m1_reports_local_planner_infeasible_with_class_tier_and_length(env):
+    """M1 局部矩阵把不可行状态聚合为含定位信息的 CONFIG_ERROR。"""
+    impossible_rules = """\
+[[generate.stream.rules]]
+template = "init"
+frame_class = "task_request"
+
+[[generate.stream.rules]]
+template = "exactly"
+frame_class = "task_request"
+count = 2
+
+[[generate.stream.rules]]
+template = "end"
+frame_class = "followup"
+"""
+    tier = """\
+[[generate.stream.tiers]]
+tier_rank = 1
+weight = 1
+frame_classes = ["task_request", "followup"]
+"""
+    generate = GS_GENERATE.replace("len_range = [3, 5]", "len_range = [2, 2]")
+    generate = generate.replace("\n[class.ticket_booking.generate]", f"\n{tier}\n"
+                                "[class.ticket_booking.generate]", 1)
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(
+        generate=generate, rules=impossible_rules)))
+    text = "\n".join(errors)
+    has(errors, "[class.ticket_booking.generate].len_range: sequence planner found no "
+                "feasible potential")
+    has(errors, "tier_rank = 1")
+    has(errors, "length = 2")
+    has(errors, "INFEASIBLE")
+    assert "payload" not in text
+
+
+@pytest.mark.parametrize(
+    ("status_name", "required", "forbidden"),
+    [("UNKNOWN", "deterministic budget", ("infeasible", "no feasible", "unsatisfiable")),
+     ("INFEASIBLE", "no feasible", ("deterministic budget",))],
+)
+def test_m1_planner_status_wording_is_closed(monkeypatch, env, status_name, required, forbidden):
+    """M1 的 UNKNOWN 只表达预算未验证，INFEASIBLE 仍明确不可满足。"""
+    from labelkit.common.runtime import sequence_planner
+
+    status = sequence_planner.PlannerStatus[status_name]
+    monkeypatch.setattr(sequence_planner, "check_question", lambda _question: status)
+
+    def fail(*_args, **_kwargs):
+        raise sequence_planner.PlannerConfigError(status_name)
+
+    monkeypatch.setattr(sequence_planner, "select_feasible_plan", fail)
+    errors = env.errors(project_text=gs_project(
+        env, sequence_tables_body(rules=RULE_INIT)))
+    text = "\n".join(errors).lower()
+    assert required in text
+    for word in forbidden:
+        assert word not in text
+
+
+def test_m1_model_invalid_is_public_internal_error(monkeypatch, env):
+    """M1 的 MODEL_INVALID 必须只暴露公共 InternalError，且不带用户值。"""
+    from labelkit.common.runtime import sequence_planner
+
+    monkeypatch.setattr(sequence_planner, "_status_name",
+                        lambda *_args: sequence_planner.PlannerStatus.MODEL_INVALID)
+    with pytest.raises(InternalError) as caught:
+        env.load(project_text=gs_project(env, sequence_tables_body(rules=RULE_INIT)))
+    assert isinstance(caught.value, InternalError)
+    assert str(caught.value) == "CP-SAT returned MODEL_INVALID"
+    assert "payload" not in str(caught.value)
+
+
+@pytest.mark.parametrize(("rule", "expected"), [
+    ("template = \"missing\"\nframe_class = \"task_request\"",
+     "expected \"existence\""),
+    ("template = \"existence\"\nframe_class = \"task_request\"",
+     "count: required for template existence"),
+    ("template = \"response\"\nframe_class = \"task_request\"",
+     "source and target are required"),
+    ("template = \"response\"\nsource = \"task_request\"\n"
+     "target = \"followup\"\ncount = 1", "count: forbidden"),
+    ("template = \"response\"\nsource = \"task_request\"\n"
+     "target = \"task_request\"", "source and target must name different"),
+])
+def test_sequence_rule_template_parameter_matrix(env, rule, expected):
+    rules = f"[[generate.stream.rules]]\n{rule}\n"
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(rules=rules)))
+    has(errors, expected)
+
+
+def test_duplicate_sequence_rules_are_rejected(env):
+    rules = RULE_INIT + RULE_INIT
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(rules=rules)))
+    has(errors, "duplicate sequence rule declaration")
+
+
+def test_global_rule_error_is_not_repeated_for_inheriting_classes(env):
+    classify = GS_CLASSIFY + """
+[[classify.classes]]
+name = "smart_home"
+description = "智能家居序列"
+    """
+    bad_rule = RULE_RESPONSE.replace('source = "task_request"', 'source = "ghost"')
+    marker = "\n[class.ticket_booking.generate]"
+    generate = GS_GENERATE.replace(marker, f"\n{bad_rule}{marker}", 1)
+    body = gs_body(classify=classify, generate=generate)
+    errors = env.errors(project_text=gs_project(env, body))
+    assert sum("frame class \"ghost\" is not in [[frame.classify.classes]]" in e
+               for e in errors) == 1
+
+
+def test_rule_time_s_requires_exact_microseconds_and_half_open_range(env):
+    rule = RULE_RESPONSE.replace(
+        'target = "followup"', 'target = "followup"\ntime_s = [0.0000001, 1]')
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(rules=rule)))
+    has(errors, "time_s: expected number range array of length 2")
+    rule = RULE_RESPONSE.replace(
+        'target = "followup"', 'target = "followup"\ntime_s = [1, 1]')
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(rules=rule)))
+    has(errors, "time_s: expected non-empty half-open range")
+
+
+def test_sequence_window_validation_sorts_before_overlap_check(env):
+    windows = """\
+[[generate.stream.windows]]
+frame_class = "task_request"
+of_day = [["14:00", "17:00"], ["08:00", "11:00"]]
+"""
+    cfg = env.load(project_text=gs_project(env, sequence_tables_body(windows=windows)))
+    assert cfg.generate_stream.windows[0].of_day == (("14:00", "17:00"), ("08:00", "11:00"))
+
+    overlap = windows.replace('["08:00", "11:00"]', '["10:00", "15:00"]')
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(windows=overlap)))
+    has(errors, "branches must not overlap")
+
+
+def test_sequence_window_rejects_cross_midnight_duplicate_and_bad_weekday(env):
+    windows = """\
+[[generate.stream.windows]]
+frame_class = "task_request"
+of_day = [["22:00", "02:00"]]
+of_week = ["mon", "mon"]
+"""
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(windows=windows)))
+    has(errors, "window must satisfy start < end")
+    has(errors, "weekday values must be distinct")
+    bad_week = windows.replace('of_week = ["mon", "mon"]',
+                               'of_week = ["mon", "noday"]')
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(windows=bad_week)))
+    has(errors, "expected \"mon\" | \"tue\"")
+
+
+def test_correlation_requires_structured_required_same_type_and_unbound_fields(env):
+    correlation = ("correlation = {operator = \"equal\", source_field = \"subject_id\", "
+                   "target_field = \"subject_id\"}")
+    rules = RULE_RESPONSE.replace("target = \"followup\"",
+                                  "target = \"followup\"\n" + correlation)
+    frames = structured_correlation_frames()
+    cfg = env.load(project_text=gs_project(env, sequence_tables_body(rules=rules, frames=frames)))
+    assert cfg.generate_stream.rules[0].correlation == CorrelationSpec(
+        operator="equal", source_field="subject_id", target_field="subject_id")
+
+    mismatch = structured_correlation_frames(target_type="number")
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(
+        rules=rules, frames=mismatch)))
+    has(errors, "source_field and target_field must declare the same JSON Schema type")
+
+    missing_required = structured_correlation_frames(source_required=False)
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(
+        rules=rules, frames=missing_required)))
+    has(errors, "correlation.target_field")
+    has(errors, "must be listed in the required array")
+
+    bound = structured_correlation_frames(bind_subject=True)
+    errors = env.errors(project_text=gs_project(env, sequence_tables_body(
+        rules=rules, frames=bound)))
+    has(errors, "must not be a bound time_fields property")
+
+
+# ── v1.15 按类档位表（[[class.<name>.generate.tiers]]；SPEC-per-class-tiers §3.1）─
+
+GS_CLASSIFY2 = GS_CLASSIFY + """
+[[classify.classes]]
+name = "smart_home"
+description = "智能家居控制序列"
+"""
+
+SMART_HOME = """
+[class.smart_home.generate]
+instruction = "生成一段智能家居控制的用户请求序列"
+sequences = 3
+len_range = [3, 5]
+"""
+
+# 教学面（SPEC §3.5）：整表原子覆盖 + 构成与权重双差异（权重方向与全局表相反）
+OWN_TIERS = ((1, 1, ("task_request", "followup")),
+             (2, 2, ("task_request", "confirmation")))
+
+
+def per_class_tiers(rows=OWN_TIERS, cname: str = "ticket_booking") -> str:
+    """``[[class.<name>.generate.tiers]]`` 片段：逐行 (tier_rank, weight, 构成)。"""
+    return "".join(
+        f"\n[[class.{cname}.generate.tiers]]\ntier_rank = {rank}\nweight = {weight}\n"
+        f"frame_classes = {json.dumps(list(names))}\n"
+        for rank, weight, names in rows)
+
+
+def mixed_body(*, own=OWN_TIERS, tiers: str = TIERS, generate: str = GS_GENERATE,
+               smart_home: str = SMART_HOME, frames: str = GS_FRAMES3) -> str:
+    """混合形态基线：ticket_booking 声明按类表、smart_home 回落全局表（各 3 条配额）。
+
+    sessions 抬到 3 以满足 sessions <= Σsequences(6) <= 2 × sessions。
+    """
+    generate = generate.replace("sessions = 2", "sessions = 3") + smart_home
+    own_toml = per_class_tiers(own) if own else ""
+    return gs_body(classify=GS_CLASSIFY2, generate=generate + tiers + own_toml,
+                   frames=frames)
+
+
+def test_per_class_tier_table_overrides_the_global_one_atomically(env, capsys):
+    cfg = env.load(project_text=gs_project(env, mixed_body()))
+    assert cfg.class_views["ticket_booking"].tiers == (
+        TierSpec(tier_rank=1, weight=1, frame_classes=("task_request", "followup")),
+        TierSpec(tier_rank=2, weight=2,
+                 frame_classes=("task_request", "confirmation")))
+    assert cfg.class_views["smart_home"].tiers is None       # 未声明 ⇒ 回落全局
+    assert cfg.generate_stream.tiers[1].frame_classes == (   # 全局表不被污染
+        "task_request", "followup", "confirmation")
+    assert "unknown key" not in capsys.readouterr().err      # 白名单第七键正例
+
+
+def test_per_class_tier_table_is_stored_by_ascending_rank(env):
+    # 生效表也走 tiers[rank - 1] 直取 ⇒ 存放序由 rank 定，而非书写序
+    shuffled = tuple(reversed(OWN_TIERS))
+    cfg = env.load(project_text=gs_project(env, mixed_body(own=shuffled)))
+    tiers = cfg.class_views["ticket_booking"].tiers
+    assert [t.tier_rank for t in tiers] == [1, 2]
+    assert [t.weight for t in tiers] == [1, 2]
+
+
+def test_per_class_tier_table_requires_the_time_stream_form(env):
+    # rule 61①（parked 探针）：形态关闭时任何 [class.*.generate] 含 tiers 键即定向报错
+    body = CLASSIFY_TWO + per_class_tiers(cname="qa")
+    errors = env.errors(project_text=env.project(body=body))
+    has(errors, "[class.qa.generate].tiers: the per-class tier table is only legal in the "
+                "time-stream generation form ([generate.stream].enabled = true) - it "
+                "overrides the global [[generate.stream.tiers]] table for sequences of "
+                "this class")
+
+
+def test_per_class_premise_probe_is_independent_of_the_parse(env):
+    # 探针走原始节：表内容非法（解析产物为空）也要照发前提错误
+    body = CLASSIFY_TWO + per_class_tiers(((0, 1, ("task_request",)),), cname="qa")
+    errors = env.errors(project_text=env.project(body=body))
+    has(errors, "[class.qa.generate].tiers: the per-class tier table is only legal in the "
+                "time-stream generation form")
+    has(errors, "[[class.qa.generate.tiers]][1].tier_rank: expected positive integer, got 0")
+
+
+def test_per_class_tier_table_requires_the_global_anchor(env):
+    # rule 61②：全局表是面开关兼未声明类的回落，缺席即 CONFIG_ERROR
+    errors = env.errors(project_text=gs_project(env, mixed_body(tiers="")))
+    has(errors, "[class.ticket_booking.generate].tiers: a per-class tier table overrides "
+                "the global [[generate.stream.tiers]] table, which is absent - declare the "
+                "global table (it is the fallback for classes without their own table and "
+                "the switch of the whole tier face)")
+
+
+def test_per_class_empty_tier_table_is_rejected(env):
+    # rule 61③：显式空表在面统一下没有合法语义（"本类无档"态不存在）
+    generate = GS_GENERATE + "tiers = []\n"
+    errors = env.errors(project_text=gs_project(env, tier_body(generate=generate)))
+    has(errors, "[class.ticket_booking.generate].tiers: expected a non-empty array of tier "
+                "tables - omit the key to fall back to the global "
+                "[[generate.stream.tiers]] table")
+
+
+def test_per_class_tier_table_shape_errors_name_the_class(env):
+    # 定位串参数化：整表形状错误落键级定位 [class.<name>.generate].tiers，
+    # 行级错误落该表的表数组头（用户写的就是这个头）
+    generate = GS_GENERATE + "tiers = 3\n"
+    errors = env.errors(project_text=gs_project(env, tier_body(generate=generate)))
+    has(errors, "[class.ticket_booking.generate].tiers: expected array of tables, got 3")
+    generate = GS_GENERATE + 'tiers = ["x"]\n'
+    errors = env.errors(project_text=gs_project(env, tier_body(generate=generate)))
+    has(errors, '[[class.ticket_booking.generate.tiers]][1]: expected table, got "x"')
+
+
+def test_rule_61_sub_clauses_2_and_3_are_mutually_exclusive(env):
+    # rule 61②/③ 互斥（实现期裁决 2026-08-19）：同一个键一条错误一个修复动作——
+    # 空表的修复动作（删键）与锚缺失的修复动作（补全局表）不同，叠报会误导
+    generate = GS_GENERATE + "tiers = []\n"
+    errors = env.errors(project_text=gs_project(env, tier_body("", generate=generate)))
+    has(errors, "[class.ticket_booking.generate].tiers: expected a non-empty array of tier "
+                "tables - omit the key to fall back to the global "
+                "[[generate.stream.tiers]] table")
+    assert not any("which is absent" in e for e in errors)
+
+
+def test_a_shape_failed_per_class_table_lands_as_undeclared(env):
+    # 形状错误（非数组）已在解析层报出且修复动作明确——按未声明落库，
+    # rule 61 的空表错与锚错都不叠报（全局表缺席也不报锚错）
+    generate = GS_GENERATE + "tiers = 3\n"
+    errors = env.errors(project_text=gs_project(env, tier_body("", generate=generate)))
+    has(errors, "[class.ticket_booking.generate].tiers: expected array of tables, got 3")
+    assert not any("non-empty array of tier tables" in e for e in errors)
+    assert not any("which is absent" in e for e in errors)
+
+
+def test_each_effective_table_covers_1_to_n_on_its_own(env):
+    # 裁决·rank 类内身份：每张生效表各自连续覆盖 1..N，N 可逐类不同
+    cfg = env.load(project_text=gs_project(
+        env, mixed_body(own=((1, 1, ("task_request", "followup")),))))
+    assert [t.tier_rank for t in cfg.class_views["ticket_booking"].tiers] == [1]
+    assert [t.tier_rank for t in cfg.generate_stream.tiers] == [1, 2]
+    # 反例：按类表自己缺号（定位串带类名）
+    gapped = ((1, 1, ("task_request", "followup")),
+              (3, 2, ("task_request", "confirmation")))
+    errors = env.errors(project_text=gs_project(env, mixed_body(own=gapped)))
+    has(errors, "[class.ticket_booking.generate].tiers.tier_rank: tier ranks must be unique "
+                "and cover 1..N contiguously (N = 2 = the number of tiers; the rank is the "
+                "identity of a tier, there is no name key), got [1, 3]")
+
+
+def test_same_composition_is_legal_across_tables_but_not_within_one(env):
+    # 跨类同构成合法（各类都可有自己的「全类档」）——基线按类表第 1 档就与全局第 1 档同构成
+    cfg = env.load(project_text=gs_project(env, mixed_body()))
+    assert (cfg.class_views["ticket_booking"].tiers[0].frame_classes
+            == cfg.generate_stream.tiers[0].frame_classes)
+    # 单表之内照旧两两互异（构成是集合：书写序不同、集合相同即语义重复）
+    dup = ((1, 1, ("task_request", "followup")),
+           (2, 2, ("followup", "task_request")))
+    errors = env.errors(project_text=gs_project(env, mixed_body(own=dup)))
+    has(errors, "[class.ticket_booking.generate].tiers(tier_rank = 2).frame_classes: the "
+                "composition is identical to the one of tier_rank = 1 - two tiers with the "
+                "same frame-class set are semantically duplicates")
+
+
+def test_quota_pairs_read_the_effective_table_of_each_class(env):
+    # 下界裁定吃本类生效表：按类表第 2 档构成 3 类 vs 本类下界 2 ⇒ 错误指向声明类；
+    # 回落全局表的 smart_home（下界 3）不受牵连
+    own = ((1, 1, ("task_request", "followup")),
+           (2, 2, ("task_request", "followup", "confirmation")))
+    generate = GS_GENERATE.replace("len_range = [3, 5]", "len_range = [2, 5]")
+    errors = env.errors(project_text=gs_project(
+        env, mixed_body(own=own, generate=generate)))
+    has(errors, "[class.ticket_booking.generate].len_range: the lower bound must be >= the "
+                "composition size of every tier this class draws from (tier_rank = 2 "
+                "declares 3 frame classes and is apportioned 2 of the 3 sequences, and each "
+                "of them must appear at least once), got lower bound 2")
+    assert not any("[class.smart_home.generate].len_range" in e for e in errors)
+
+
+def test_zero_quota_warning_lists_the_weights_of_the_effective_table(env, capsys):
+    # 按类权重悬殊：3 条按 (5, 1) 最大余额法配分 = (3, 0) ⇒ 本类第 2 档零额；
+    # 回落全局表的 smart_home 按 (2, 1) 配成 (2, 1)，无零额
+    own = ((1, 5, ("task_request", "followup")),
+           (2, 1, ("task_request", "confirmation")))
+    env.load(project_text=gs_project(env, mixed_body(own=own)))
+    err = capsys.readouterr().err
+    assert ('[[generate.stream.tiers]]: class "ticket_booking" apportions 0 sequences to '
+            "tier_rank = 2" in err)
+    assert "weights tier_rank 1: weight 5, tier_rank 2: weight 1" in err
+    assert "smart_home" not in err
+
+
+def test_dead_config_domain_is_the_union_of_the_effective_tables(env, capsys):
+    # 裁决·校验域并集化：两类都声明按类表 ⇒ 全局表沦为纯锚，其独有帧类判死配置
+    # （连生成指令都不必写），检查域精确反映"哪些帧类真会被蓝图选中"
+    frames = GS_FRAMES + """
+[[frame.classify.classes]]
+name = "confirmation"
+description = "确认下单的收尾帧"
+"""
+    own = ((1, 1, ("task_request", "followup")),)
+    body = mixed_body(own=own, frames=frames,
+                      smart_home=SMART_HOME + per_class_tiers(own, "smart_home"))
+    cfg = env.load(project_text=gs_project(env, body))
+    assert cfg.frame_class_views["confirmation"].gen_instruction is None
+    assert ('[frame.class.confirmation.generate]: frame class "confirmation" is in no tier '
+            "composition, so it can never be picked by a blueprint" in capsys.readouterr().err)
+    # 反证：只要**某个**参与类的生效表收了它，指令就重新必填
+    own_cf = ((1, 1, ("task_request", "confirmation")),)
+    errors = env.errors(project_text=gs_project(
+        env, mixed_body(own=own_cf, frames=frames,
+                        smart_home=SMART_HOME + per_class_tiers(own, "smart_home"))))
+    has(errors, "[frame.class.confirmation.generate].instruction: every frame class must "
+                "provide a non-empty generation instruction (the blueprint enum covers the "
+                "union of the tier compositions, so any frame class of a tier may be picked)")
+
+
+def test_a_zero_quota_class_still_gets_its_table_structurally_checked(env, capsys):
+    # 裁决·零额结构校验不豁免：坏配置早报，但配额对与零额 WARN 照旧豁免
+    zero = SMART_HOME.replace("sequences = 3", "sequences = 0")
+    ghost = ((1, 1, ("task_request", "ghost")),)
+    errors = env.errors(project_text=gs_project(env, mixed_body(
+        smart_home=zero + per_class_tiers(ghost, "smart_home"))))
+    has(errors, '[class.smart_home.generate].tiers(tier_rank = 1).frame_classes: frame class '
+                'name "ghost" is not in [[frame.classify.classes]], available: task_request, '
+                "followup, confirmation")
+    assert not any("[class.smart_home.generate].len_range" in e for e in errors)
+    assert 'class "smart_home" apportions 0 sequences' not in capsys.readouterr().err
+
+
 # ── v1.14 时间字段绑定表（[frame.class.<name>.generate.time_fields]）──────────
 
 TIME_GEN_PROPS = {"utterance": {"type": "string"}, "duration": {"type": "number"}}
@@ -1231,8 +1855,7 @@ def test_time_fields_value_must_be_in_the_frozen_vocabulary(env):
     errors = env.errors(project_text=gs_project(env, gs_body(frames=frames)))
     has(errors, "[frame.class.task_request.generate.time_fields].duration: expected one of "
                 "the time vocabulary terms ts, ts_ms, end_ts_ms, gap_prev_s, gap_next_s, "
-                "elapsed_s, day_period, workday_type (a frozen closed set), got "
-                '"gap_s"')
+                "elapsed_s, day_period, workday_type (a frozen closed set), got \"gap_s\"")
 
 
 @pytest.mark.parametrize("prop, got", [
@@ -1290,3 +1913,22 @@ def test_time_fields_table_shape_errors(env):
     errors = env.errors(project_text=gs_project(env, gs_body(frames=frames)))
     has(errors, "[frame.class.task_request.generate.time_fields].duration: expected string "
                 "(a time vocabulary term), got 3")
+
+
+def test_full_planner_activation_uses_the_limited_quota_prefix():
+    """`--limit` 完全截掉约束类时不激活全流 planner。"""
+    from labelkit.common.config._generate_stream_constraints import (
+        _has_nonzero_constraints,
+    )
+
+    clear = SimpleNamespace(generate=SimpleNamespace(sequences=1), rules=(), windows=())
+    constrained = SimpleNamespace(
+        generate=SimpleNamespace(sequences=1),
+        rules=(SequenceRuleSpec(template="init", frame_class="task_request"),),
+        windows=(),
+    )
+    stream = SimpleNamespace(rules=(), windows=())
+    values = SimpleNamespace(class_views={"alpha": clear, "zeta": constrained}, limit=1)
+    assert not _has_nonzero_constraints(stream, values)
+    assert _has_nonzero_constraints(stream, SimpleNamespace(
+        class_views=values.class_views, limit=2))

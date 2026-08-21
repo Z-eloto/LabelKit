@@ -935,3 +935,27 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - P0.5 增加自动 secret scan 后，才能把“防止再次提交”从 `.gitignore` 软防护提升为 CI 硬门。
 
 判定：P0.1 的“当前 Agent 分支不携带明文密钥”验收已通过；整体密钥事件在外部轮换和历史净化完成前仍保持开放状态。
+
+### 2026-08-22：P0.2 fork 与 upstream v1.16 基线整合
+
+状态：**代码整合与核心验证完成；Windows 配置测试夹具问题转入 P0.3。**
+
+已完成：
+
+- 在 `feat/all-day-stream-generation-zj` 上提交本计划，提交为 `81e7ea7`；
+- 创建本地恢复分支 `backup/pre-agent-upstream-merge-20260822`，固定合并前状态；
+- 获取并合并 `upstream/main` 的 v1.16 基线 `9938032`；
+- 冲突解决采用上游 v1.16 的模块拆分，并把 fork 的 `time_profiles`、毫秒时间字段与日历字段迁移到新模块；
+- 保留上游 `tiers`、`rules`、`windows`、联合规划器和时序运行时实现；
+- `tests/operators/test_generate_stream.py` 通过：78 passed；
+- 五个带 `time_profiles` 的 synth-stream 示例均通过真实 CLI 配置验证；
+- 排除配置测试目录后的离线回归为 1596 passed、1 skipped、25 failed；失败均已定位为合并前计划中列出的 Windows 路径、覆盖式 rename、控制台输入或冻结文件清单问题；
+- 生产代码通过 `py_compile`，工作树通过 `git diff --check`，不存在冲突标记。
+
+已知基线问题：
+
+- `tests/common/config/test_loader_generate_stream.py` 在 Windows 下生成未转义的临时路径，TOML 在业务校验前报 `Invalid hex value`；本次观察到 170 failed、78 passed，失败具有同一根因；
+- 其余 25 个失败主要来自 Windows 下目标文件已存在时 `Path.rename`/`os.rename` 不覆盖、路径分隔符断言、控制台按键轮询，以及 fork 新增测试未进入上游冻结文件清单；
+- 这些问题按计划归入 P0.3/P0.4，不在 P0.2 合并中夹带跨平台修复。
+
+判定：P0.2 已达到“上游能力与 fork 自定义能力同时保留、核心纯逻辑可复现”的合并验收条件；下一步执行 P0.3。

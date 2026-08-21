@@ -18,10 +18,16 @@ from labelkit.common.config import ResolvedConfig, default_rubric, load
 from labelkit.common.config import loader as loader_mod
 from labelkit.common.config.model import (
     CliOverrides,
+    CorrelationSpec,
     ConsoleConfig,
     GenerateStreamConfig,
+    SequenceRuleSpec,
+    SequenceWindowSpec,
     TierSpec,
     apportion_tiers,
+    effective_rules,
+    effective_tiers,
+    effective_windows,
 )
 from labelkit.common.errors import ConfigError
 
@@ -158,6 +164,7 @@ def test_happy_path_defaults(env):
     assert cfg.tool.log_level == "info"
     assert cfg.llm_profiles["default"].max_concurrency == 8
     assert cfg.llm_profiles["default"].provider == "openai_compatible"
+    assert cfg.llm_profiles["default"].thinking is None
     # resolution duties
     assert cfg.quality.rubric == "default:text"        # auto by modality
     assert cfg.rubric.name == "default-text-v1"
@@ -177,6 +184,25 @@ def test_happy_path_defaults(env):
     assert cfg.generate_stream == GenerateStreamConfig()
     assert cfg.generate.sequences == 0
     assert cfg.generate.len_range == (3, 6)
+
+
+def test_llm_thinking_accepts_explicit_value(env):
+    config = BASE_CONFIG.replace(
+        'supports_structured_output = true\n',
+        'supports_structured_output = true\nthinking = "disabled"\n',
+    ).replace('[llm.judge]', '[llm.judge]\nthinking = "enabled"')
+    cfg = env.load(config_text=config)
+    assert cfg.llm_profiles["default"].thinking == "disabled"
+    assert cfg.llm_profiles["judge"].thinking == "enabled"
+
+
+def test_llm_thinking_rejects_unknown_value(env):
+    config = BASE_CONFIG.replace(
+        'model = "main-model"\n',
+        'model = "main-model"\nthinking = "automatic"\n',
+    )
+    errors = env.errors(config_text=config)
+    has(errors, '[llm.default].thinking: expected "enabled" | "disabled", got "automatic"')
 
 
 def test_digests_are_sha256_of_raw_bytes(env):
@@ -3325,6 +3351,23 @@ def test_class_views_v113_fields_default_off(env):
         assert view.generate.len_range == (3, 6)
 
 
+def test_sequence_rule_and_window_models_are_frozen_and_have_three_state_helpers():
+    rule = SequenceRuleSpec(template="response", source="a", target="b",
+                            correlation=CorrelationSpec(source_field="id",
+                                                        target_field="id"))
+    window = SequenceWindowSpec(frame_class="a", of_day=(("09:00", "10:00"),))
+    global_rules = (rule,)
+    global_windows = (window,)
+    assert effective_rules(None, global_rules) == global_rules
+    assert effective_rules((), global_rules) == ()
+    assert effective_rules((rule,), global_rules) == (rule,)
+    assert effective_windows(None, global_windows) == global_windows
+    assert effective_windows((), global_windows) == ()
+    assert effective_windows((window,), global_windows) == (window,)
+    with pytest.raises(FrozenInstanceError):
+        rule.template = "init"
+
+
 def test_frame_class_views_v113_generate_face_default_none(env):
     body = SEG_ON + "\n" + FRAME_CLASSIFY_ONLY + "\n" + FRAME_ANNOTATE_ONLY
     cfg = env.load(project_text=env.project(body=body))
@@ -3414,3 +3457,29 @@ def test_apportionment_can_hand_a_tier_zero_and_stays_a_pure_function():
     assert apportion_tiers(0, tiers) == (0, 0)       # 不参与的类：逐档零额
     assert apportion_tiers(3, ()) == ()              # 档位面不在场
     assert apportion_tiers(3, tiers) == apportion_tiers(3, tiers)   # 零 rng
+
+
+# ── v1.15 按类档位表：载体缺省与 effective_tiers 三态（SPEC-per-class-tiers §3.1）─
+
+
+def test_class_view_tiers_default_is_absent(env):
+    # 载体缺省 = None（未声明 ⇒ 回落全局表）；零覆盖的类经 _inherit_class 亦得 None
+    body = ('[classify]\nenabled = true\nfallback_class = "other"\n'
+            '[[classify.classes]]\nname = "qa"\ndescription = "问答"\n'
+            '[[classify.classes]]\nname = "other"\ndescription = "其它"\n')
+    cfg = env.load(project_text=env.project(body=body))
+    assert set(cfg.class_views) == {"qa", "other"}
+    for view in cfg.class_views.values():
+        assert view.tiers is None
+
+
+def test_effective_tiers_covers_the_three_carrier_states():
+    # 裁决·表级原子覆盖：None = 回落全局整张表；非空 = 类表整表取代（不做行级合并）
+    glob = _tiers(2, 1)
+    own = (TierSpec(tier_rank=1, weight=7, frame_classes=("g",)),)
+    assert effective_tiers(None, glob) is glob
+    assert effective_tiers(own, glob) is own
+    assert effective_tiers(own, ()) is own
+    # 显式空表原样回传——拒收归 M1（rule 61③），查找点不替用户做决定
+    assert effective_tiers((), glob) == ()
+    assert effective_tiers(None, ()) == ()

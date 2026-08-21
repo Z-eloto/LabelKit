@@ -25,13 +25,17 @@ class RecordRef:
     pair_index: int | None            # UI 模态：文件对 index
     generated_from: tuple[str, ...]   # process 模式生成样本：种子记录 id 列表；其余（含 generate_only 生成样本）为空元组——合成判据用 generator（v1.4）
     generator: Mapping | None = None  # v1.2：生成记录的 {"llm": profile 名, "style": name|None} 溯源（3.6.2）；非生成记录为 None
-                                      # 键集条件形（v1.14）：恒含 llm 与 style 两键；时间流生成的档位表
-                                      #   （[[generate.stream.tiers]]）在场时增第三键 tier_rank（该序列所属
-                                      #   档位序数，正整数），档位表缺省时维持两键——「信封只增字段」惯例（6.3）
+                                      # 键集条件形（v1.14）：恒含 llm 与 style 两键；时间流生成的**任一生效
+                                      #   档位表**在场时增第三键 tier_rank（该序列所属档位序数，正整数），
+                                      #   全缺省时维持两键——「信封只增字段」惯例（6.3）。v1.15 注：按类档位表
+                                      #   要求全局表在场（全局表为锚），故「任一生效表在场」⟺ 全局
+                                      #   [[generate.stream.tiers]] 非空——判据与 v1.14 逐字同义，只是
+                                      #   值取自本行序列类的生效表（跨类不可比，3.6.5）
                                       # v1.13 时间流生成侧构造约定（3.6.5）：成员帧的 ref =
                                       #   RecordRef(source_file=时间流工件路径, line_no=工件行号（1 基）,
                                       #   pair_index=None, generated_from=(), generator={"llm","style"}
-                                      #   ——档位表在场时为 {"llm","style","tier_rank"} 三键)
+                                      #   ——任一生效档位表在场（= 全局表非空）时为
+                                      #   {"llm","style","tier_rank"} 三键)
                                       #   ——工件是该帧的**真实来源文件**，故走 source_file/line_no 而非
                                       #   空源；序列 Record 的 ref 照 S24 继承首成员 ref（下方 Record 注）
 
@@ -87,6 +91,18 @@ class Classification:                 # v1.7：M13 分类结果（3.13）
     labels: tuple[str, ...]               # 该记录命中全集（声明序；single 恒单元素）
     source: Literal["llm", "fallback", "inherited"]
     detail: Mapping                       # reason / sc 统计 / fallback 留痕（kind, message）
+
+@dataclass(frozen=True)
+class SequenceValidationFrame:         # v1.16：M6 序列级生成钩子的单帧输入（3.6.6）
+    position: int                       # 序列内零基位置
+    frame_class: str                    # planner 冻结的帧类名
+    payload: object                     # JSON-compatible 深拷贝；钩子修改不得回写内部载荷
+
+@dataclass(frozen=True)
+class SequenceValidationInput:         # v1.16：generate.sequence_validator 的输入（3.6.6）
+    sequence_class: str                 # 生成序列类名
+    tier_rank: int | None               # 该类生效档位序数；无档位面时为 None
+    frames: tuple[SequenceValidationFrame, ...]  # 按序列位置排列的成员帧
 
 @dataclass
 class PipelineItem:                   # 唯一可变信封；生命周期 = 一个批
@@ -251,3 +267,11 @@ def tree_diff(a: UITree | None, b: UITree | None, quantize_px: int) -> Mapping
 ```
 
 **预算原语契约引（v1.11）**：上下文预算的估算与装填原语（`margin` / `input_budget` / `embed_budget` / `est_text` / `est_image_prior` / `est_prompt` / `fit_text` / `min_window` / `classify_stage_error` 与 `ImageCostCalibrator`）为新共享模块 `labelkit/common/runtime/budget.py` 的模块级纯函数与类（common 层运行时，**非本章类型层**——签名与冻结常数以 CONTRACTS 的 budget 新节为准，机制见 3.9）；本章共享渲染层（`serialize` / `frame_digest` / `tree_diff`）签名零改动，装填器（贪心切窗等）属算子逻辑、落各算子模块。
+
+**序列规则与 Stage 契约（v1.16 零改动声明）**：v1.16 新增的
+`SequenceValidationFrame` / `SequenceValidationInput` 只描述 M6 调用用户序列钩子时传入的
+只读视图，不是新的 `PipelineItem` 或 `Stage` 例外。M6 仍返回富的生成子批（序列信封与
+工件行），不修改原批；每个序列信封出厂即为普通 `active` 信封，继续走既有下游链。规则、
+窗口、correlation、planner 状态和钩子违规不会写进 `Record`、`PipelineItem.errors` 或
+新的状态值；整条 attempt 作废只表现为缺席与既有计数器。钩子取得 payload 的深拷贝，
+任何用户修改都不能污染内部载荷、时间字段回填或 duplicate source。
