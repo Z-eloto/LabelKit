@@ -973,3 +973,21 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 工作树通过 `git diff --check`。
 
 判定：Windows 下由未转义反斜杠引起的 TOML `Invalid hex value` 已消除；下一步执行 P0.4 的覆盖式原子交付修复。
+
+### 2026-08-22：P0.4 Windows 覆盖式原子交付
+
+状态：**完成。**
+
+已完成：
+
+- emitter 的同目录交付由 `os.rename()` 改为跨平台覆盖语义一致的 `os.replace()`；
+- orchestrator 测试替身同步真实交付契约，避免 Windows 目标已存在时产生 `WinError 183`；
+- 增加“旧目标存在时由新 `.part` 完整替换”的显式回归测试；
+- `docs/CONTRACTS.md` 同步冻结为 `os.replace` 交付语义；
+- P0.4 针对性回归与完整 orchestrator 测试通过：142 passed；生产模块通过 `py_compile`，差异通过 `git diff --check`。
+
+已知非 P0.4 问题：完整 emitter + orchestrator 回归为 208 passed、3 failed；剩余项是 Windows UI 路径分隔符断言与文本模式 CRLF 字节差异，不再包含覆盖式 rename 失败。
+
+完整离线新基线：2135 passed、1 skipped、8 failed、49 deselected。八项由冻结测试文件清单、Windows rich-console 文本/路径、控制台按键轮询、UI 路径分隔符与 CRLF 字节差异构成；配置转义和覆盖式交付失败均已清零。
+
+判定：P0.4 验收完成；剩余跨平台展示/换行差异与冻结文件清单在 P0.5 基线整理时处理。

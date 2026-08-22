@@ -4400,7 +4400,7 @@ class Emitter:                                     # signatures [FROZEN HERE]
         content — M6 finalizes it (§9.5)."""
 
     def finalize(self, report: Mapping, deliver: bool = True) -> None:
-        """fsync + atomic os.rename {output}.part → {output} (and sidecar) when deliver=True;
+        """fsync + atomic os.replace {output}.part → {output} (and sidecar) when deliver=True;
         always writes {output_stem}.report.json (cfg.dry_run diverts to {output_stem}.dryrun.report.json,
         v1.5 P2-4); prints the final stderr summary table matching
         report['counts'] — v1.10 让位 (U21): the text lines come from
@@ -6353,7 +6353,8 @@ M5/M11 per the v1.12 split above.
 ### 9.4 Atomic delivery
 
 Main output (and sidecar) is appended to `<name>.part` with per-batch flush; finalize = fsync +
-`os.rename` to the target name. At any instant the directory holds either the `.part` or the
+`os.replace` to the target name (including replacement of a previous run on Windows). At any
+instant the directory holds either the `.part` or the
 final file, never a half-written final file — every delivered line is complete and valid.
 v1.6: a circuit-break finalize ALSO renames (partial delivery of completed batches, spec 3.10.3
 熔断交付), so the final name appearing no longer implies the whole input was processed —

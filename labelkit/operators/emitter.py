@@ -850,7 +850,7 @@ class Emitter:
             os.fsync(fh.fileno())
         fh.close()
         if deliver:
-            os.rename(part, target)
+            os.replace(part, target)
 
     def _close_all(self) -> None:
         """关闭全部已开通道并复位句柄（清理路径，绝不掩盖首要错误）。"""

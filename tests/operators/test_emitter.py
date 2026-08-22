@@ -1207,6 +1207,19 @@ def test_atomic_part_naming_and_rename(tmp_path):
     assert not (tmp_path / "out" / "res.meta.jsonl.part").exists()
 
 
+def test_atomic_delivery_replaces_an_existing_target(tmp_path):
+    cfg = make_cfg(tmp_path)
+    target = tmp_path / "out" / "res.jsonl"
+    target.write_text("stale output\n", encoding="utf-8")
+
+    run_emitter(cfg, [make_item()])
+
+    rows = read_jsonl(target)
+    assert len(rows) == 1
+    assert rows[0]["intent"] == "writing_assist"
+    assert not target.with_suffix(".jsonl.part").exists()
+
+
 def test_finalize_deliver_false_leaves_part_writes_report(tmp_path):
     cfg = make_cfg(tmp_path)
     em, _ = run_emitter(cfg, [make_item()], finalize=False)

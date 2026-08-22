@@ -272,7 +272,7 @@ class FakeEmitter:
         self.report = report
         self.deliver = deliver
         if deliver and self.part.exists():
-            self.part.rename(self.output)
+            self.part.replace(self.output)
         self.report_path.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
 
 
