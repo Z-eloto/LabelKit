@@ -994,7 +994,7 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 
 ### 2026-08-22：P0.5 双平台 CI 与安全门禁
 
-状态：**本地实现与验收完成；远端 Actions 首跑由推送触发。**
+状态：**完成。**
 
 已完成：
 
@@ -1007,6 +1007,7 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 新增 `tools/check_secrets.py`，扫描 Git 已跟踪及待加入文件中的高置信度 API key、GitHub token、AWS key、私钥和敏感文件名；扫描结果只报告位置与类型，不打印值；
 - 完整离线套件通过：2141 passed、3 skipped、49 deselected；
 - 本地 secret scan 通过，生产代码与扫描器通过 `py_compile`，差异通过 `git diff --check`。
+- GitHub Actions 首轮运行 `32583037026` 成功：Ubuntu 离线测试、Windows 离线测试与 Secret scan 三个 job 全部通过。
 
 边界：当前门禁扫描提交树，不替代模型服务后台的密钥轮换，也不自动净化其他分支或远端引用中的历史泄露。
 
