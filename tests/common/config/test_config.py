@@ -10,7 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import FrozenInstanceError
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import tomllib
 
 import pytest
 
@@ -72,14 +73,19 @@ api_key_env = "LK_TEST_KEY_EMB"
 """
 
 
+def toml_string(value: object) -> str:
+    """Encode a scalar path/string as a TOML basic string."""
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def make_project(*, output_path, input_path=None, modality="text", run_extra="",
                  annotate_body='instruction = "标注意图"', body="", schema=SCHEMA,
                  include_output=True) -> str:
     parts = ["schema_version = 1", "", "[run]"]
     if input_path is not None:
-        parts.append(f'input = "{input_path}"')
+        parts.append(f"input = {toml_string(input_path)}")
     if output_path is not None:
-        parts.append(f'output = "{output_path}"')
+        parts.append(f"output = {toml_string(output_path)}")
     parts.append(f'modality = "{modality}"')
     if run_extra:
         parts.append(run_extra)
@@ -92,6 +98,14 @@ def make_project(*, output_path, input_path=None, modality="text", run_extra="",
     if include_output:
         parts += ["[output]", "schema_inline = '''", schema, "'''"]
     return "\n".join(parts) + "\n"
+
+
+def test_make_project_escapes_windows_paths_for_toml():
+    input_path = PureWindowsPath(r"C:\Users\tester\input.jsonl")
+    output_path = PureWindowsPath(r"C:\temp\out\result.jsonl")
+    parsed = tomllib.loads(make_project(input_path=input_path, output_path=output_path))
+    assert parsed["run"]["input"] == str(input_path)
+    assert parsed["run"]["output"] == str(output_path)
 
 
 class Env:
@@ -257,7 +271,7 @@ def test_trace_explicit_path_kept(env):
 def test_schema_path_variant(env):
     schema_file = env.tmp / "schema.json"
     schema_file.write_text(SCHEMA, encoding="utf-8")
-    body = f'[output]\nschema_path = "{schema_file}"'
+    body = f"[output]\nschema_path = {toml_string(schema_file)}"
     cfg = env.load(project_text=env.project(include_output=False, body=body))
     assert cfg.user_schema == json.loads(SCHEMA)
     assert cfg.output.schema_path == str(schema_file)
@@ -3084,7 +3098,7 @@ def test_frame_schema_path_variant_and_unreadable(env):
     schema_file.write_text(FRAME_SCHEMA, encoding="utf-8")
     prefix = SEG_ON + '\n[frame.annotate]\nenabled = true\ninstruction = "标"\n'
     cfg = env.load(project_text=env.project(
-        body=prefix + f'schema_path = "{schema_file}"\n'))
+        body=prefix + f"schema_path = {toml_string(schema_file)}\n"))
     assert cfg.frame_schema == json.loads(FRAME_SCHEMA)
     assert cfg.frame_annotate.schema_path == str(schema_file)
     errors = env.errors(project_text=env.project(

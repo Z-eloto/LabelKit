@@ -3295,8 +3295,8 @@ _CONSOLE_PROJECT_TOML = """\
 schema_version = 1
 
 [run]
-input = {input_path!r}
-output = {output_path!r}
+input = {input_path}
+output = {output_path}
 modality = "text"
 
 [quality]
@@ -3320,8 +3320,9 @@ def _write_console_pair(tmp_path):
     data.write_text('{"text": "样例一"}\n{"text": "样例二"}\n', encoding="utf-8")
     config.write_text(_CONSOLE_CONFIG_TOML, encoding="utf-8")
     project.write_text(
-        _CONSOLE_PROJECT_TOML.format(input_path=str(data),
-                                     output_path=str(out_dir / "o.jsonl"),
+        _CONSOLE_PROJECT_TOML.format(input_path=json.dumps(str(data), ensure_ascii=False),
+                                     output_path=json.dumps(str(out_dir / "o.jsonl"),
+                                                            ensure_ascii=False),
                                      schema=_CONSOLE_SCHEMA),
         encoding="utf-8",
     )

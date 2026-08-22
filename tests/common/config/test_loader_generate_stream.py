@@ -38,6 +38,7 @@ from tests.common.config.test_config import (  # noqa: F401 (env is a fixture)
     Env,
     env,
     has,
+    toml_string,
 )
 
 # ── the canonical time-stream project body (mirrors examples/synth-stream) ──
@@ -614,7 +615,7 @@ def test_class_annotate_schema_path_variant_and_unreadable(env):
     schema_file = env.tmp / "qa_schema.json"
     schema_file.write_text(CLASS_SCHEMA, encoding="utf-8")
     cfg = env.load(project_text=env.project(
-        body=class_schema_body(f'schema_path = "{schema_file}"')))
+        body=class_schema_body(f"schema_path = {toml_string(schema_file)}")))
     assert cfg.class_views["qa"].schema == json.loads(CLASS_SCHEMA)
     errors = env.errors(project_text=env.project(
         body=class_schema_body('schema_path = "ghost/qa.json"')))
@@ -761,7 +762,7 @@ def test_frame_class_generate_schema_parsed(env):
 def test_frame_class_generate_schema_path_variant_and_unreadable(env):
     schema_file = env.tmp / "frame_gen.json"
     schema_file.write_text(FRAME_GEN_SCHEMA, encoding="utf-8")
-    frames = frames_with_schema(f'schema_path = "{schema_file}"')
+    frames = frames_with_schema(f"schema_path = {toml_string(schema_file)}")
     cfg = env.load(project_text=gs_project(env, gs_body(frames=frames)))
     assert cfg.frame_class_views["task_request"].gen_schema == json.loads(
         FRAME_GEN_SCHEMA)

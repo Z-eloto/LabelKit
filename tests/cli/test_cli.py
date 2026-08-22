@@ -12,6 +12,7 @@ import ast
 import importlib
 import importlib.util
 import io
+import json
 import logging
 import runpy
 import sys
@@ -738,8 +739,8 @@ def _project_toml(input_path: str, output_path: str) -> str:
 schema_version = 1
 
 [run]
-input = {input_path!r}
-output = {output_path!r}
+input = {json.dumps(input_path, ensure_ascii=False)}
+output = {json.dumps(output_path, ensure_ascii=False)}
 modality = "text"
 
 [quality]
@@ -839,8 +840,8 @@ _TRACE_PROJECT = """\
 schema_version = 1
 
 [run]
-input = {input_path!r}
-output = {output_path!r}
+input = {input_path}
+output = {output_path}
 modality = "text"
 
 [quality]
@@ -865,8 +866,9 @@ def _write_pair(tmp_path, input_path: str) -> tuple:
     out_dir.mkdir(exist_ok=True)
     config.write_text(_VALID_CONFIG, encoding="utf-8")
     project.write_text(
-        _TRACE_PROJECT.format(input_path=input_path,
-                              output_path=str(out_dir / "o.jsonl"),
+        _TRACE_PROJECT.format(input_path=json.dumps(input_path, ensure_ascii=False),
+                              output_path=json.dumps(str(out_dir / "o.jsonl"),
+                                                     ensure_ascii=False),
                               schema=_SCHEMA_INLINE),
         encoding="utf-8",
     )
