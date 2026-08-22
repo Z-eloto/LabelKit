@@ -4017,6 +4017,10 @@ builder passes the effective value in).
 
 ### 7.9 M10 — `labelkit/orchestration/orchestrator.py`
 
+The library-facing result data types live in `labelkit/orchestration/results.py`; M10 imports
+`RunSummary` from there and keeps the historical
+`labelkit.orchestration.orchestrator.RunSummary` import path as the same class object.
+
 ```python
 @dataclass(frozen=True)                            # [FROZEN HERE]
 class RunSummary:
@@ -4032,6 +4036,23 @@ class RunSummary:
     wall_s: float
     output_lines: int
     rejects_lines: int
+
+
+@dataclass(frozen=True)                            # [FROZEN HERE — Phase 1]
+class RunArtifacts:
+    report: Path                                   # successful real and dry runs both write it
+    output: Path | None = None                     # None = not delivered (including dry-run)
+    rejects: Path | None = None                    # None = disabled or not produced
+    sidecar: Path | None = None
+    trace: Path | None = None
+    stream: Path | None = None                     # generated all-day stream artifact
+
+
+@dataclass(frozen=True)                            # [FROZEN HERE — Phase 1]
+class RunResult:
+    run_id: str
+    summary: RunSummary
+    artifacts: RunArtifacts
 
 
 @dataclass(frozen=True)                            # [FROZEN HERE — 2026-08-14]

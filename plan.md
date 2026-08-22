@@ -1012,3 +1012,20 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 边界：当前门禁扫描提交树，不替代模型服务后台的密钥轮换，也不自动净化其他分支或远端引用中的历史泄露。
 
 判定：Phase 0 的本地工程基线已达到进入 Phase 1 的条件；下一步执行 P1.1，定义结构化运行结果契约。
+
+### 2026-08-23：P1.1 结构化运行结果契约
+
+状态：**完成。**
+
+已完成：
+
+- 新增 `labelkit/orchestration/results.py`，集中承载不执行 I/O、不推导路径、不映射 CLI 退出码的纯数据契约；
+- 将既有 `RunSummary` 原字段、字段顺序与冻结语义原样迁入结果模块，并保留 `labelkit.orchestration.orchestrator.RunSummary` 与包级导入为同一个类对象；
+- 新增冻结的 `RunArtifacts`，显式区分必有的 report 与可能未启用、未生成或未交付的 output、rejects、sidecar、trace、stream 路径；
+- 新增冻结的 `RunResult`，以 `run_id + summary + artifacts` 组成后续库级 execute API 的返回契约；
+- 更新 `docs/CONTRACTS.md` 和冻结的生产/测试文件清单，增加字段形态、可选路径语义、不可变性及旧导入兼容测试；
+- 直接契约与 orchestrator 回归通过：144 passed；完整离线套件通过：2147 passed、3 skipped、49 deselected；secret scan、`py_compile` 与 `git diff --check` 均通过。
+
+边界：本批只有数据类型与导出位置变化；`execute_run()` 仍返回退出码，`validate_project()` 仍返回 `ResolvedConfig`，CLI 输出、异常映射、文件交付和运行行为均未改变。结构化对象的构造与接线留给 P1.2–P1.4。
+
+判定：P1.1 达到“只有数据类型、无行为变化”的验收条件；下一步执行 P1.2，暴露结构化 validate API 并保持 CLI 输出逐字节不变。

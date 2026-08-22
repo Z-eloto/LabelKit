@@ -121,6 +121,7 @@ EXPECTED_PRODUCTION_PY = {
     "labelkit/orchestration/factory.py",
     "labelkit/orchestration/orchestrator.py",
     "labelkit/orchestration/profile_usage.py",
+    "labelkit/orchestration/results.py",
     "labelkit/orchestration/runtime.py",
 }
 
@@ -169,6 +170,7 @@ EXPECTED_TEST_PY = {
     "tests/operators/test_stitch.py",
     "tests/operators/test_verify.py",
     "tests/orchestration/test_orchestrator.py",
+    "tests/orchestration/test_results.py",
     "tests/test_build_all_day_stream.py",
     "tests/test_export_stream_views.py",
 }

@@ -51,6 +51,7 @@ from labelkit.common.contracts.types import PipelineItem, Record
 from labelkit.common.errors import CircuitBreakerTripped, InternalError
 from labelkit.common.runtime import budget
 from labelkit.orchestration.profile_usage import referenced_profiles
+from labelkit.orchestration.results import RunSummary
 
 if TYPE_CHECKING:
     from labelkit.common.config.model import LLMProfile, ResolvedConfig, TierSpec
@@ -380,18 +381,6 @@ def estimate_run(cfg: "ResolvedConfig", plan: "IngestPlan | None") -> dict:
         est[key] = calls[key]
     est["total_calls"] = sum(calls[key] for key in _ESTIMATE_CALL_ORDER)
     return est
-
-
-@dataclass(frozen=True)                            # [FROZEN in CONTRACTS.md §7.9]
-class RunSummary:
-    """一次运行的对外摘要——CLI 据此收敛退出码与终端摘要行。"""
-
-    counts: Mapping                                # 与 report.json "counts" 同键集（§9.3）
-    interrupted: bool                              # 是否被 SIGINT/SIGTERM 优雅中断
-    exit_code: int                                 # 4（熔断）| 1（strict 且有 rejects）| 0
-    wall_s: float                                  # 运行墙钟秒数
-    output_lines: int                              # 主输出行数
-    rejects_lines: int                             # rejects 行数
 
 
 @dataclass(frozen=True)

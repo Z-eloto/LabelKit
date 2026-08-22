@@ -3,6 +3,7 @@
 from labelkit.orchestration.factory import build_stages
 from labelkit.orchestration.orchestrator import Orchestrator, RunServices, RunSummary
 from labelkit.orchestration.profile_usage import referenced_profiles
+from labelkit.orchestration.results import RunArtifacts, RunResult
 from labelkit.orchestration.runtime import (
     execute_run,
     probe_referenced_profiles,
@@ -12,6 +13,8 @@ from labelkit.orchestration.runtime import (
 __all__ = [
     "Orchestrator",
     "RunServices",
+    "RunArtifacts",
+    "RunResult",
     "RunSummary",
     "build_stages",
     "execute_run",
