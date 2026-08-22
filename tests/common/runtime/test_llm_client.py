@@ -1423,6 +1423,7 @@ def test_key_pool_events_carry_env_names_only(tmp_path, caplog):
     绝不出现在 trace 或 stderr 里（spec 7.4 红线）。"""
     from labelkit.common.observability.obslog import EventLog, MetricsSink
     from tests.common.observability.test_obslog import make_cfg
+    # secret-scan: allow-test-fixture -- synthetic value verifies redaction.
 
     sentinel = "sk-SENTINEL-VALUE-MUST-NEVER-BE-LOGGED"
     trace_path = tmp_path / "run.trace.jsonl"

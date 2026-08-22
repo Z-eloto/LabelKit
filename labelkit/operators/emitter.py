@@ -149,11 +149,13 @@ class Emitter:
         :raises LabelKitError: 输出路径不可写（CLI 退出码 4）。
         """
         try:
-            self._main_fh = open(self._output_part, "w", encoding="utf-8")
+            self._main_fh = open(self._output_part, "w", encoding="utf-8", newline="\n")
             if self._cfg.output.meta_mode == "sidecar":
-                self._sidecar_fh = open(self._sidecar_part, "w", encoding="utf-8")
+                self._sidecar_fh = open(self._sidecar_part, "w", encoding="utf-8",
+                                        newline="\n")
             if self._cfg.output.rejects != "none":
-                self._rejects_fh = open(self._rejects_path, "w", encoding="utf-8")
+                self._rejects_fh = open(self._rejects_path, "w", encoding="utf-8",
+                                        newline="\n")
                 self._rejects_opened = True
         except OSError as exc:
             self._close_all()
@@ -306,7 +308,8 @@ class Emitter:
         （``_run_dry`` 不驱动生成、不开 emitter 通道）。同时冻结 run 摘要条目
         （路径/sha256/行数——sha256 按落盘字节计，config_digest 同款前缀形态）。"""
         try:
-            self._artifact_fh = open(self._artifact_part, "w", encoding="utf-8")
+            self._artifact_fh = open(self._artifact_part, "w", encoding="utf-8",
+                                     newline="\n")
         except OSError as exc:
             self._undeliverable = True
             raise LabelKitError(f"stream artifact channel unwritable: {exc}") from exc
@@ -947,7 +950,7 @@ def _raw_payload(rec: Record) -> Mapping:
         return rec.raw or {}
     return {
         "ui_tree": rec.ui_tree.serialize() if rec.ui_tree is not None else "",
-        "image_path": str(rec.image.path) if rec.image is not None else "",
+        "image_path": rec.image.path.as_posix() if rec.image is not None else "",
     }
 
 

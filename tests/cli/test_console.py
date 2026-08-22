@@ -128,7 +128,7 @@ def _canvas(renderer: ConsoleRenderer, *, width: int = 100) -> str:
     capture console (no ANSI)."""
     from rich.console import Console
 
-    capture_console = Console(width=width, height=40, force_terminal=True,
+    capture_console = Console(width=width, height=40, force_terminal=False,
                               no_color=True, file=io.StringIO())
     with capture_console.capture() as cap:
         capture_console.print(renderer._render())
@@ -140,7 +140,7 @@ def _final_canvas(renderer: ConsoleRenderer, counts: dict, *,
     """定格末帧快照（U8）：与 `_canvas` 同款定宽捕获，抓 `_render_final()`。"""
     from rich.console import Console
 
-    capture_console = Console(width=width, height=40, force_terminal=True,
+    capture_console = Console(width=width, height=40, force_terminal=False,
                               no_color=True, file=io.StringIO())
     with capture_console.capture() as cap:
         capture_console.print(renderer._render_final(counts))
@@ -1224,6 +1224,8 @@ def _keyboard_on(renderer: ConsoleRenderer, read_fd: int) -> None:
     renderer._kbd_active = True
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="select() cannot poll pipe file descriptors on Windows")
 def test_poll_keys_drains_pending_bytes_through_handle_key(_pipe,
                                                            _finalize_renderers):
     """轮询搭 `_maybe_refresh` 便车：待读字节逐个过 `_handle_key` 生效
@@ -1240,6 +1242,8 @@ def test_poll_keys_drains_pending_bytes_through_handle_key(_pipe,
     assert "LABELKIT_KEY_A ok  calls 150" in _canvas(renderer)
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="select() cannot poll pipe file descriptors on Windows")
 def test_poll_keys_stops_polling_after_detach(_pipe, _finalize_renderers):
     """`q` 脱离后立即返回——同一次轮询里排在它后面的字节**不再消费**
     （余下按键留给终端，不被面板吞掉）。"""

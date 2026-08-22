@@ -1297,11 +1297,11 @@ class ConsoleRenderer:
             parts.append(self._line(" llm_usage", style="bold"))
             parts.append(self._usage_table(snap))
 
-        stem = str(Path(cfg.run.output).with_suffix(""))
+        stem = Path(cfg.run.output).with_suffix("").as_posix()
         if cfg.output.rejects != "none":
             parts.append(self._line(f" rejects → {stem}.rejects.jsonl"))
         if cfg.trace.enabled:
-            parts.append(self._line(f" trace → {cfg.trace.path}"))
+            parts.append(self._line(f" trace → {Path(cfg.trace.path).as_posix()}"))
         return self._Group(*parts)
 
     def _counts_table(self, counts: dict) -> Any:

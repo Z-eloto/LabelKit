@@ -169,6 +169,8 @@ EXPECTED_TEST_PY = {
     "tests/operators/test_stitch.py",
     "tests/operators/test_verify.py",
     "tests/orchestration/test_orchestrator.py",
+    "tests/test_build_all_day_stream.py",
+    "tests/test_export_stream_views.py",
 }
 
 REMOVED_MODULES = (
