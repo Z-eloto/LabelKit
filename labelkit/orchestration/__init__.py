@@ -12,6 +12,7 @@ from labelkit.orchestration.results import (
 )
 from labelkit.orchestration.runtime import (
     estimate_project,
+    execute_project,
     execute_run,
     probe_referenced_profiles,
     validate_project,
@@ -29,6 +30,7 @@ __all__ = [
     "ValidationResult",
     "build_stages",
     "estimate_project",
+    "execute_project",
     "execute_run",
     "probe_referenced_profiles",
     "referenced_profiles",

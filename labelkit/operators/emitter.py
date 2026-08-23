@@ -118,6 +118,8 @@ class Emitter:
         self._reject_lines_written = 0     # 实际落进 rejects 文件的行数
         self._rejects_opened = False
         self._undeliverable = False        # 有通道写失败：绝不改名 .part
+        self._channels_delivered = False   # 本轮 final paths 已完成原子交付
+        self._report_written = False       # 本轮 report 已成功写出
         self._progress_active = False
         # v1.12：帧计数通路（frame_annotate.failed / frame_annotate.discarded）——
         # M10 装配期注入 MetricsSink（Ingestor.metrics 同款装配期鸭子面，构造签名
@@ -346,6 +348,7 @@ class Emitter:
         self._end_progress()
         deliver = deliver and not self._undeliverable
         self._deliver_channels(deliver)
+        self._channels_delivered = deliver
         if deliver:
             _log.info(
                 "finalize: fsync + rename  %s -> %s (%d lines)",
@@ -354,6 +357,31 @@ class Emitter:
             )
         self._write_report(report)
         self._print_summary(report)
+
+    def produced_paths(self) -> dict[str, Path]:
+        """Return a snapshot of final paths actually produced by this run.
+
+        The snapshot is state-based: it never infers a result from configured
+        filenames or from files left by an earlier run.  Main, sidecar, and
+        stream paths appear only after atomic delivery; rejects appears after
+        its direct-write channel opened; report appears only after its write
+        completed.  Dry-run consequently exposes only its diverted report.
+
+        @return: Mapping keyed by ``report``, ``output``, ``rejects``,
+            ``sidecar``, and ``stream`` for channels produced so far.
+        """
+        paths: dict[str, Path] = {}
+        if self._report_written:
+            paths["report"] = self._report_path
+        if self._channels_delivered:
+            paths["output"] = self._output_path
+            if self._cfg.output.meta_mode == "sidecar":
+                paths["sidecar"] = self._sidecar_path
+            if self.artifact_summary is not None:
+                paths["stream"] = self._artifact_path
+        if self._rejects_opened:
+            paths["rejects"] = self._rejects_path
+        return paths
 
     def _deliver_channels(self, deliver: bool) -> None:
         """逐个交付已开通道（主输出 → 工件 → sidecar → rejects），末了统一收口。
@@ -392,6 +420,7 @@ class Emitter:
             )
         except OSError as exc:
             raise LabelKitError("report write failed") from exc
+        self._report_written = True
 
         # spec 3.11.3 ③ 逐字 run 收尾行：rejects 文件（实际行数，且仅在通道开过时
         # 出现）加 report 路径。

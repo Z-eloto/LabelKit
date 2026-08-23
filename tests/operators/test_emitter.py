@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -1197,6 +1198,9 @@ def test_atomic_part_naming_and_rename(tmp_path):
     assert (tmp_path / "out" / "res.meta.jsonl.part").exists()
     assert not out.exists()
     assert not (tmp_path / "out" / "res.meta.jsonl").exists()
+    assert em.produced_paths() == {
+        "rejects": tmp_path / "out" / "res.rejects.jsonl",
+    }
     # flushed prefix already valid JSONL
     assert len(read_jsonl(tmp_path / "out" / "res.jsonl.part")) == 1
 
@@ -1205,6 +1209,33 @@ def test_atomic_part_naming_and_rename(tmp_path):
     assert (tmp_path / "out" / "res.meta.jsonl").exists()
     assert not (tmp_path / "out" / "res.jsonl.part").exists()
     assert not (tmp_path / "out" / "res.meta.jsonl.part").exists()
+    assert em.produced_paths() == {
+        "report": tmp_path / "out" / "res.report.json",
+        "output": tmp_path / "out" / "res.jsonl",
+        "sidecar": tmp_path / "out" / "res.meta.jsonl",
+        "rejects": tmp_path / "out" / "res.rejects.jsonl",
+    }
+
+
+def test_dry_run_produced_paths_ignore_stale_real_channels(tmp_path):
+    cfg = make_cfg(tmp_path)
+    stale = [
+        tmp_path / "out" / "res.jsonl",
+        tmp_path / "out" / "res.rejects.jsonl",
+        tmp_path / "out" / "res.meta.jsonl",
+        tmp_path / "out" / "res.stream.jsonl",
+    ]
+    for path in stale:
+        path.write_text("stale\n", encoding="utf-8")
+    cfg = replace(cfg, dry_run=True)
+    em = Emitter(cfg, EngineStub(), "ab12cd34ef56", RUN_STARTED_AT)
+
+    assert em.produced_paths() == {}
+    em.finalize({"counts": {}}, deliver=False)
+
+    assert em.produced_paths() == {
+        "report": tmp_path / "out" / "res.dryrun.report.json",
+    }
 
 
 def test_atomic_delivery_replaces_an_existing_target(tmp_path):
@@ -1569,7 +1600,6 @@ def test_passthrough_empty_gives_empty_object(tmp_path):
 
 def test_dry_run_report_path_is_diverted(tmp_path):
     # P2-4: a rehearsal writes <stem>.dryrun.report.json, never the real ledger.
-    from dataclasses import replace
     cfg = replace(make_cfg(tmp_path), dry_run=True)
     em = Emitter(cfg, engine=None, run_id="a" * 12,
                  run_started_at=datetime.now().astimezone())
@@ -1724,6 +1754,7 @@ def test_stream_artifact_channel_part_rename_and_summary(tmp_path):
 
     assert em.artifact_summary["sha256"] == (
         "sha256:" + hashlib_module.sha256(data).hexdigest())
+    assert em.produced_paths()["stream"] == artifact
 
 
 def test_stream_artifact_undeliverable_never_renames(tmp_path):

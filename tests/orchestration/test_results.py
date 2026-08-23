@@ -14,9 +14,11 @@ from labelkit.orchestration import (
     RunResult,
     RunSummary,
     ValidationResult,
+    execute_project,
 )
 from labelkit.orchestration.orchestrator import RunSummary as LegacyRunSummary
 from labelkit.orchestration.results import RunSummary as CanonicalRunSummary
+from labelkit.orchestration.runtime import execute_project as RuntimeExecuteProject
 
 
 def _summary() -> RunSummary:
@@ -36,6 +38,10 @@ def test_run_summary_keeps_legacy_import_identity_and_shape():
         "counts", "interrupted", "exit_code", "wall_s",
         "output_lines", "rejects_lines",
     ]
+
+
+def test_execute_project_is_exported_from_orchestration_package():
+    assert execute_project is RuntimeExecuteProject
 
 
 def test_run_artifacts_distinguish_produced_and_absent_channels(tmp_path):

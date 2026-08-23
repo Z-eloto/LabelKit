@@ -1065,3 +1065,20 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 边界：现有静态事实源只估算记录、批次和调用次数，因此本批不虚构 token 或费用数值；价格/预算风险将在后续工具层基于明确的模型价格与预算配置增量实现。原有 `--dry-run` 仍保留 report/trace 和逐字节控制台行为。
 
 判定：P1.3 达到“Agent 可直接消费估算且不解析 stderr、不触发付费或产物写入”的验收条件；下一步执行 P1.4，暴露结构化 execute API 并返回 summary 与 artifact paths。
+
+### 2026-08-23：P1.4 结构化 execute API
+
+状态：**完成。**
+
+已完成：
+
+- 新增 `execute_project()`，返回冻结的 `RunResult(run_id, summary, artifacts)`，异常继续按既有类型传播；
+- `execute_run()` 收敛为 `execute_project(...).summary.exit_code` 薄封装，CLI 调用签名、listener 时序、退出码和控制台输出均不改变；
+- Emitter 以本轮通道生命周期记录真实产物：主输出、sidecar 与 stream 仅在原子交付后出现，rejects 仅在本轮直写通道打开后出现，report 仅在写入成功后出现；
+- EventLog 仅在本轮至少成功写出一个事件后暴露 trace 路径；后续失败时保留可消费的有效前缀，不因只知道配置文件名而误报；
+- dry-run 只返回改道后的 report，以及启用时实际写出的改道 trace；即使真实通道路径存在上一轮旧文件，也不会归入本轮 `RunArtifacts`；
+- 增加包级导出、旧入口薄封装、dry-run 真实路径、陈旧文件隔离、Emitter 通道状态和 trace 首写/中途失败边界测试；相关回归通过：276 passed；
+- 生产代码新增 88 行、删除 7 行；P1.1 已提前定义结果契约，因此本批无需为达到原估算行数而重复实现类型或路径规则；
+- 完整离线套件通过：2162 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+
+判定：P1.4 达到“返回 summary 与本轮真实 artifact paths，CLI 保持薄封装”的验收条件；下一步执行 P1.5，建立不触发 LLM、不泄露全文的文本输入只读 profile。

@@ -26,7 +26,12 @@ from labelkit.orchestration.orchestrator import (
     estimate_run,
 )
 from labelkit.orchestration.profile_usage import referenced_profiles
-from labelkit.orchestration.results import RunEstimate, ValidationResult
+from labelkit.orchestration.results import (
+    RunArtifacts,
+    RunEstimate,
+    RunResult,
+    ValidationResult,
+)
 from labelkit.operators.emitter import Emitter
 
 if TYPE_CHECKING:
@@ -36,6 +41,7 @@ if TYPE_CHECKING:
     from labelkit.operators.ingest import Ingestor
 
 __all__ = [
+    "execute_project",
     "execute_run",
     "estimate_project",
     "probe_referenced_profiles",
@@ -137,13 +143,13 @@ def _build_ingestor(cfg: ResolvedConfig, metrics: MetricsSink) -> "Ingestor | No
     return ingestor
 
 
-def execute_run(
+def execute_project(
     config_path: str | Path,
     project_path: str | Path,
     overrides: CliOverrides,
     listener: "ProgressListener | None" = None,
-) -> int:
-    """加载配置、装配运行期对象图、执行一轮运行。
+) -> RunResult:
+    """加载配置、装配运行期对象图并返回一轮运行的结构化结果。
 
     v1.10（U19）：``listener`` 是控制台面板的进程内旁路——构造 MetricsSink 时接入，事件
     循环启动前经 ``on_run_context`` 激活；传 None（v1.10 之前的全部调用方）与 v1.9 逐字节
@@ -153,7 +159,7 @@ def execute_run(
     @param project_path: 工程级 project.toml 路径
     @param overrides: CLI 覆盖项
     @param listener: 控制台面板进度监听器；None 表示不挂面板
-    @return: 进程退出码
+    @return: 运行身份、摘要与本轮实际产物路径
     """
     cfg = load(Path(config_path), Path(project_path), overrides)
     setup_logging(cfg)
@@ -166,11 +172,12 @@ def execute_run(
     schema_engine = SchemaEngine(dict(cfg.user_schema), llm, cfg.output, metrics)
     services = RunServices(llm=llm, schema_engine=schema_engine, metrics=metrics,
                            run_id=run_id, run_started_at=run_started_at)
+    emitter = Emitter(cfg, schema_engine, run_id, run_started_at)
     orchestrator = Orchestrator(
         cfg,
         build_stages(cfg),
         _build_ingestor(cfg, metrics),
-        Emitter(cfg, schema_engine, run_id, run_started_at),
+        emitter,
         services,
     )
     if listener is not None:
@@ -179,7 +186,34 @@ def execute_run(
         summary = asyncio.run(orchestrator.run())
     finally:
         event_log.close()
-    return summary.exit_code
+    paths = emitter.produced_paths()
+    return RunResult(
+        run_id=run_id,
+        summary=summary,
+        artifacts=RunArtifacts(
+            report=paths["report"],
+            output=paths.get("output"),
+            rejects=paths.get("rejects"),
+            sidecar=paths.get("sidecar"),
+            trace=event_log.produced_path,
+            stream=paths.get("stream"),
+        ),
+    )
+
+
+def execute_run(
+    config_path: str | Path,
+    project_path: str | Path,
+    overrides: CliOverrides,
+    listener: "ProgressListener | None" = None,
+) -> int:
+    """Execute one run and preserve the legacy exit-code-only API.
+
+    @return: Process exit code from the structured run summary.
+    """
+    return execute_project(
+        config_path, project_path, overrides, listener=listener,
+    ).summary.exit_code
 
 
 def validate_project(

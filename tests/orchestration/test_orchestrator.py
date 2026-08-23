@@ -44,10 +44,12 @@ from labelkit.orchestration.orchestrator import (
 )
 from labelkit.orchestration.runtime import (
     estimate_project,
+    execute_project,
     execute_run,
     validate_project,
     validate_project_result,
 )
+from labelkit.orchestration.results import RunArtifacts, RunResult
 from labelkit.common.contracts.types import (
     Classification, DedupInfo, PipelineItem, QualityScore, Record, RecordRef,
     StageError,
@@ -3361,6 +3363,56 @@ def test_execute_run_listener_receives_run_context(tmp_path, monkeypatch, capsys
     # non-TTY auto → plain: line output intact, no estimate forwarded (U13)
     assert "dry-run: mode=process" in capsys.readouterr().err
     assert listener.estimates == []
+
+
+def test_execute_project_returns_summary_and_only_this_runs_artifacts(
+        tmp_path, monkeypatch, capsys):
+    """P1.4: library callers receive data and never infer stale channel paths."""
+    monkeypatch.setenv("LABELKIT_ORCH_TEST_KEY", "test-key")
+    config, project, out_dir = _write_console_pair(tmp_path)
+    project.write_text(
+        project.read_text(encoding="utf-8")
+        + "\n[trace]\nenabled = true\ncontent = \"none\"\n",
+        encoding="utf-8",
+    )
+    for name in ("o.jsonl", "o.rejects.jsonl", "o.meta.jsonl", "o.stream.jsonl"):
+        (out_dir / name).write_text("stale\n", encoding="utf-8")
+
+    result = execute_project(config, project, CliOverrides(dry_run=True))
+
+    assert isinstance(result, RunResult)
+    assert len(result.run_id) == 12
+    assert set(result.run_id) <= set("0123456789abcdef")
+    assert result.summary.exit_code == 0
+    assert result.summary.output_lines == result.summary.rejects_lines == 0
+    assert result.artifacts == RunArtifacts(
+        report=out_dir / "o.dryrun.report.json",
+        trace=out_dir / "o.trace.dryrun.jsonl",
+    )
+    assert result.artifacts.report.exists()
+    assert result.artifacts.trace is not None and result.artifacts.trace.exists()
+    assert "dry-run: mode=process" in capsys.readouterr().err
+
+
+def test_execute_run_is_thin_exit_code_wrapper(monkeypatch, tmp_path):
+    """The legacy API delegates once and returns only RunSummary.exit_code."""
+    result = RunResult(
+        run_id=RUN_ID,
+        summary=RunSummary({}, False, 4, 0.1, 0, 0),
+        artifacts=RunArtifacts(report=tmp_path / "r.report.json"),
+    )
+    calls = []
+
+    def structured(config_path, project_path, overrides, listener=None):
+        calls.append((config_path, project_path, overrides, listener))
+        return result
+
+    monkeypatch.setattr("labelkit.orchestration.runtime.execute_project", structured)
+    listener = RecorderListener()
+    overrides = CliOverrides(dry_run=True)
+
+    assert execute_run("config.toml", "project.toml", overrides, listener) == 4
+    assert calls == [("config.toml", "project.toml", overrides, listener)]
 
 
 def test_execute_run_rich_dry_run_yields_to_listener(tmp_path, monkeypatch, capsys):

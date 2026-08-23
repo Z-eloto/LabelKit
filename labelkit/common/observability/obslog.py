@@ -19,6 +19,7 @@ import os
 import sys
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Callable, Mapping, Protocol
 
 from labelkit.common.config.model import ResolvedConfig, TraceConfig
@@ -310,6 +311,21 @@ class EventLog:
         @return True = 通道已因写失败关闭
         """
         return self._closed
+
+    @property
+    def produced_path(self) -> Path | None:
+        """Return the trace path when this run wrote at least one event.
+
+        Trace is deliberately best-effort rather than atomically delivered.  A
+        path therefore remains useful after a later write failure, but an
+        unopened, disabled, or first-write-failed channel must not be reported
+        merely because its configured filename is known.
+
+        @return: Actual trace path, or ``None`` when this run wrote no event.
+        """
+        if self.events_written == 0 or not self.cfg.path:
+            return None
+        return Path(self.cfg.path)
 
     def emit(self, ev: TraceEvent) -> None:
         """行缓冲 JSONL 写出。

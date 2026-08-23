@@ -4044,7 +4044,8 @@ class RunArtifacts:
     output: Path | None = None                     # None = not delivered (including dry-run)
     rejects: Path | None = None                    # None = disabled or not produced
     sidecar: Path | None = None
-    trace: Path | None = None
+    trace: Path | None = None                       # present after >= 1 best-effort event write;
+                                                   # may contain a valid prefix after later failure
     stream: Path | None = None                     # generated all-day stream artifact
 
 
@@ -4124,6 +4125,18 @@ same aggregated `ConfigError`, and successful validation still prints `configura
 or output/trace/report channel and prints no console text. `assumptions` always declares that
 retries and repairs are excluded, then conditionally records the class/multi-label lower bound,
 stream downstream sessions lower bound, and worst-case segment budget upper bound.
+
+`execute_project(config_path, project_path, overrides, listener=None)` owns the same runtime
+object graph and side effects as the historical run entry point, but returns `RunResult` instead
+of reducing the outcome to an integer. `RunArtifacts` is assembled from channel lifecycle state,
+never by guessing configured filenames or testing paths that may belong to an earlier run: main,
+sidecar, and stream require successful atomic delivery; rejects requires that its direct-write
+channel opened; report requires a completed write; trace requires at least one successful event
+write and may identify the valid prefix left by a later best-effort trace failure. A successful
+dry-run therefore reports only its diverted report and, when enabled, diverted trace. Failures
+continue to propagate as the existing typed exceptions and do not manufacture a `RunResult`.
+`execute_run(...) -> int` is the compatibility wrapper
+`execute_project(...).summary.exit_code`; the CLI remains its unchanged renderer/caller.
 
 Normative behavior: split `ingestor.records()` into batches of `run.batch_size` (`--limit`
 truncates the stream to the first N records); wrap into `PipelineItem`s; per batch, per enabled
@@ -4747,9 +4760,11 @@ exception rendering, and the sole exception-to-exit-code mapping; `labelkit/cli/
 preserves the established public imports and `labelkit.cli:main` console-script target.
 
 Wiring order for `run`: CLI parses arguments and calls
-`labelkit.orchestration.runtime.execute_run` — v1.10 signature (trailing param only, U19):
+`labelkit.orchestration.runtime.execute_run` — the compatibility wrapper over
+`execute_project`, retaining the v1.10 signature (trailing param only, U19):
 `execute_run(config_path, project_path, overrides, listener: ProgressListener | None = None)
--> int`; `labelkit/cli/commands.py` constructs the LAZY-SHELL `ConsoleRenderer`
+-> int`; `execute_project` performs the object-graph assembly below and returns `RunResult`, while
+`execute_run` selects `summary.exit_code`. `labelkit/cli/commands.py` constructs the LAZY-SHELL `ConsoleRenderer`
 (`labelkit/cli/console.py` — the SOLE rich import point in the codebase, imported lazily at
 activation; operators/common keep zero rich touchpoints, M1 probes importability via
 find_spec only, §6.3 rule 42) and passes it as `listener`. That orchestration runtime owns

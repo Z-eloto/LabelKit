@@ -142,6 +142,7 @@ def _reset_labelkit_logger():
 
 def test_trace_line_has_exactly_seven_fields_in_order(tmp_path):
     log, path = open_log(tmp_path)
+    assert log.produced_path is None
     log.emit(ev("quality.judgment", record_ids=("a", "b"),
                 payload={"model": "glm-5.2"}))
     log.close()
@@ -155,6 +156,7 @@ def test_trace_line_has_exactly_seven_fields_in_order(tmp_path):
     assert obj["run_id"] == "f3a9c04b7d21"
     assert log.events_written == 1
     assert log.dropped_events == 0
+    assert log.produced_path == path
 
 
 def test_run_start_header_carries_trace_schema_version(tmp_path):
@@ -192,6 +194,7 @@ def test_disabled_trace_is_noop(tmp_path):
     log.close()
     assert log.events_written == 0
     assert log.dropped_events == 0
+    assert log.produced_path is None
     assert not (tmp_path / "t.jsonl").exists()
 
 
@@ -500,6 +503,7 @@ def test_unwritable_path_warns_once_disables_and_never_raises(tmp_path, caplog):
         log.close()
     assert log.events_written == 0
     assert log.dropped_events == 2
+    assert log.produced_path is None
     warns = [r for r in caplog.records if "trace channel disabled" in r.message]
     assert len(warns) == 1
 
@@ -524,7 +528,7 @@ class _BrokenCloseFile(_BrokenFile):
 
 
 def test_midrun_write_failure_warns_once_and_counts_drops(tmp_path, caplog):
-    log, _ = open_log(tmp_path, channels=("quality",))
+    log, path = open_log(tmp_path, channels=("quality",))
     log.emit(ev("quality.gate", record_ids=("ok",)))
     log._fh.close()
     log._fh = _BrokenFile()                             # simulate I/O failure
@@ -535,6 +539,8 @@ def test_midrun_write_failure_warns_once_and_counts_drops(tmp_path, caplog):
         log.close()
     assert log.events_written == 1
     assert log.dropped_events == 2
+    # Best-effort trace remains discoverable when a valid prefix was written.
+    assert log.produced_path == path
     warns = [r for r in caplog.records if "trace channel disabled" in r.message]
     assert len(warns) == 1
 
