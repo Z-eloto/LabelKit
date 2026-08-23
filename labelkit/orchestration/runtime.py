@@ -1,4 +1,4 @@
-"""run 与 validate 两条命令的运行期对象图装配。
+"""run、validate 与 estimate 的运行期对象图装配。
 
 本模块只管装配：不解析 argparse 命名空间、不打印面向用户的文本、不把异常映射为退出码、
 也不实现任何算子行为。
@@ -19,9 +19,14 @@ from labelkit.common.observability.obslog import EventLog, MetricsSink, setup_lo
 from labelkit.common.runtime.llm_client import LLMClient
 from labelkit.common.runtime.schema_engine import SchemaEngine
 from labelkit.orchestration.factory import build_stages
-from labelkit.orchestration.orchestrator import Orchestrator, RunServices
+from labelkit.orchestration.orchestrator import (
+    Orchestrator,
+    RunServices,
+    estimate_assumptions,
+    estimate_run,
+)
 from labelkit.orchestration.profile_usage import referenced_profiles
-from labelkit.orchestration.results import ValidationResult
+from labelkit.orchestration.results import RunEstimate, ValidationResult
 from labelkit.operators.emitter import Emitter
 
 if TYPE_CHECKING:
@@ -32,12 +37,46 @@ if TYPE_CHECKING:
 
 __all__ = [
     "execute_run",
+    "estimate_project",
     "probe_referenced_profiles",
     "validate_project",
     "validate_project_result",
 ]
 
 _log = logging.getLogger("labelkit.runtime")
+
+
+def estimate_project(cfg: ResolvedConfig) -> RunEstimate:
+    """只读扫描已校验工程并返回结构化静态估算。
+
+    process 模式执行一次 M2 ``scan(estimate=True)``；generate_only 模式不读取输入。
+    本入口不构造 LLMClient、Emitter 或 trace/report 通道，不打印控制台文本。
+
+    @param cfg: 经 M1 校验的冻结配置，可直接取自 ValidationResult.config
+    @return: 带配置摘要、调用明细和估算口径的结构化结果
+    @raises InputError: process 模式输入缺失、不可读或配对策略要求失败
+    """
+    plan = None
+    if cfg.run.mode == "process":
+        from labelkit.operators.ingest import Ingestor
+        plan = Ingestor(cfg).scan(estimate=True)
+    raw = estimate_run(cfg, plan)
+    calls = {
+        key: int(value)
+        for key, value in raw.items()
+        if key not in ("records", "batches", "total_calls")
+    }
+    return RunEstimate(
+        config_digest=cfg.config_digest,
+        project_digest=cfg.project_digest,
+        mode=cfg.run.mode,
+        modality=cfg.run.modality,
+        records=int(raw["records"]),
+        batches=int(raw["batches"]),
+        calls=calls,
+        total_calls=int(raw["total_calls"]),
+        assumptions=estimate_assumptions(cfg),
+    )
 
 
 def _activate_listener(listener: "ProgressListener", cfg: ResolvedConfig,

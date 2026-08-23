@@ -1,19 +1,32 @@
 """Structured result contracts for library-level orchestration APIs.
 
-The objects in this module describe completed work only.  They perform no I/O,
-derive no paths and do not translate failures into CLI exit codes.  Runtime API
-adapters populate them in later Phase 1 slices.
+The objects in this module contain data only.  They perform no I/O, derive no
+paths and do not translate failures into CLI exit codes.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Literal, Mapping
 
 if TYPE_CHECKING:
     from labelkit.common.config.model import ResolvedConfig
 
-__all__ = ["RunArtifacts", "RunResult", "RunSummary", "ValidationResult"]
+EstimateAssumption = Literal[
+    "excludes_retries_and_repairs",
+    "class_overrides_or_multi_label_lower_bound",
+    "stream_downstream_sessions_lower_bound",
+    "segment_worst_case_budget_upper_bound",
+]
+
+__all__ = [
+    "EstimateAssumption",
+    "RunArtifacts",
+    "RunEstimate",
+    "RunResult",
+    "RunSummary",
+    "ValidationResult",
+]
 
 
 @dataclass(frozen=True)
@@ -24,6 +37,30 @@ class ValidationResult:
     config: "ResolvedConfig | None"
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class RunEstimate:
+    """Read-only record, batch and LLM-call estimate for one resolved project."""
+
+    config_digest: str
+    project_digest: str
+    mode: Literal["process", "generate_only"]
+    modality: Literal["text", "ui"]
+    records: int
+    batches: int
+    calls: Mapping[str, int]
+    total_calls: int
+    assumptions: tuple[EstimateAssumption, ...]
+
+    def as_legacy_mapping(self) -> dict[str, int]:
+        """Return the frozen key order consumed by the existing dry-run UI."""
+        return {
+            "records": self.records,
+            "batches": self.batches,
+            **self.calls,
+            "total_calls": self.total_calls,
+        }
 
 
 @dataclass(frozen=True)  # Existing shape, moved from orchestrator.py in P1.1.

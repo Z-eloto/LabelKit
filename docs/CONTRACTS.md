@@ -4063,6 +4063,27 @@ class ValidationResult:
     warnings: tuple[str, ...]
 
 
+EstimateAssumption = Literal[
+    "excludes_retries_and_repairs",
+    "class_overrides_or_multi_label_lower_bound",
+    "stream_downstream_sessions_lower_bound",
+    "segment_worst_case_budget_upper_bound",
+]
+
+
+@dataclass(frozen=True)                            # [FROZEN HERE — Phase 1]
+class RunEstimate:
+    config_digest: str
+    project_digest: str
+    mode: Literal["process", "generate_only"]
+    modality: Literal["text", "ui"]
+    records: int
+    batches: int
+    calls: Mapping[str, int]                       # frozen estimate_run call-key order
+    total_calls: int
+    assumptions: tuple[EstimateAssumption, ...]    # closed machine-readable vocabulary
+
+
 @dataclass(frozen=True)                            # [FROZEN HERE — 2026-08-14]
 class RunServices:
     """The orchestrator's shared runtime services and run identity, as ONE parameter object.
@@ -4096,6 +4117,13 @@ raising `ConfigError` for collected configuration errors. The legacy `validate_p
 its existing return/raise/render behavior. The CLI is a thin renderer over the structured result:
 warnings retain the exact `warning: {message}` stderr form, invalid results are re-raised as the
 same aggregated `ConfigError`, and successful validation still prints `configuration valid`.
+
+`estimate_project(cfg)` accepts an already validated `ResolvedConfig`, performs exactly one
+`Ingestor.scan(estimate=True)` in process mode (no scan in generate_only), and returns
+`RunEstimate` from the same `estimate_run()` formula used by dry-run. It constructs no LLM client
+or output/trace/report channel and prints no console text. `assumptions` always declares that
+retries and repairs are excluded, then conditionally records the class/multi-label lower bound,
+stream downstream sessions lower bound, and worst-case segment budget upper bound.
 
 Normative behavior: split `ingestor.records()` into batches of `run.batch_size` (`--limit`
 truncates the stream to the first N records); wrap into `PipelineItem`s; per batch, per enabled

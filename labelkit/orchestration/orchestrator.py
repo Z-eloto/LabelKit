@@ -51,7 +51,7 @@ from labelkit.common.contracts.types import PipelineItem, Record
 from labelkit.common.errors import CircuitBreakerTripped, InternalError
 from labelkit.common.runtime import budget
 from labelkit.orchestration.profile_usage import referenced_profiles
-from labelkit.orchestration.results import RunSummary
+from labelkit.orchestration.results import EstimateAssumption, RunSummary
 
 if TYPE_CHECKING:
     from labelkit.common.config.model import LLMProfile, ResolvedConfig, TierSpec
@@ -381,6 +381,28 @@ def estimate_run(cfg: "ResolvedConfig", plan: "IngestPlan | None") -> dict:
         est[key] = calls[key]
     est["total_calls"] = sum(calls[key] for key in _ESTIMATE_CALL_ORDER)
     return est
+
+
+def estimate_assumptions(cfg: "ResolvedConfig") -> tuple[EstimateAssumption, ...]:
+    """返回静态估算的机器可读口径说明，供库 API 与 dry-run 共用。"""
+    assumptions: list[EstimateAssumption] = ["excludes_retries_and_repairs"]
+    if cfg.classify.enabled and (
+        cfg.classify.assignment == "multi" or _class_overrides_exist(cfg)
+    ):
+        assumptions.append("class_overrides_or_multi_label_lower_bound")
+    if cfg.segment.enabled and cfg.segment.strategy in ("llm", "hybrid"):
+        assumptions.append("stream_downstream_sessions_lower_bound")
+        if budget.min_window(cfg) < cfg.segment.window:
+            assumptions.append("segment_worst_case_budget_upper_bound")
+    return tuple(assumptions)
+
+
+def _class_overrides_exist(cfg: "ResolvedConfig") -> bool:
+    """判断是否至少有一个按类视图偏离对应全局配置。"""
+    return any(view.quality != cfg.quality or view.rubric != cfg.rubric
+               or view.annotate != cfg.annotate or view.generate != cfg.generate
+               or view.verify != cfg.verify or view.extract != cfg.extract
+               for view in cfg.class_views.values())
 
 
 @dataclass(frozen=True)
@@ -1697,15 +1719,14 @@ class Orchestrator:
         标为最坏装填上界；w_min ≥ window（V26 的 examples）或预算关闭时注记逐字节不变
         （dry-run 黄金锚）。
         """
-        cfg = self.cfg
-        if cfg.classify.enabled and (cfg.classify.assignment == "multi"
-                                     or self._class_overrides_exist()):
+        assumptions = estimate_assumptions(self.cfg)
+        if "class_overrides_or_multi_label_lower_bound" in assumptions:
             print("dry-run: note: estimated with global config / multi reports a "
                   "lower bound at label multiplier 1", file=sys.stderr)
-        if cfg.segment.enabled and cfg.segment.strategy in ("llm", "hybrid"):
+        if "stream_downstream_sessions_lower_bound" in assumptions:
             note = ("dry-run: note: stream estimate: downstream reports a lower bound "
                     "at episodes≈sessions (LLM refinement only adds segments)")
-            if budget.min_window(cfg) < cfg.segment.window:
+            if "segment_worst_case_budget_upper_bound" in assumptions:
                 note += "; segment reports an upper bound at worst-case budget packing"
             print(note, file=sys.stderr)
 
@@ -1715,11 +1736,7 @@ class Orchestrator:
 
         @return: 存在偏离全局的按类覆盖则 True
         """
-        cfg = self.cfg
-        return any(view.quality != cfg.quality or view.rubric != cfg.rubric
-                   or view.annotate != cfg.annotate or view.generate != cfg.generate
-                   or view.verify != cfg.verify or view.extract != cfg.extract
-                   for view in cfg.class_views.values())
+        return _class_overrides_exist(self.cfg)
 
     def _estimate(self) -> dict:
         """对导出纯函数的薄封装（v1.10 U20）：经既有扫描路径拿到 plan（estimate=True 是

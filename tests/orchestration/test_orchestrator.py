@@ -35,7 +35,7 @@ from labelkit.common.config.model import (
     ToolConfig,
     TraceConfig, VerifyConfig,
 )
-from labelkit.common.errors import CircuitBreakerTripped
+from labelkit.common.errors import CircuitBreakerTripped, InputError
 from labelkit.common.runtime import budget
 from labelkit.common.observability.obslog import EventLog, MetricsSink, TraceEvent
 from labelkit.common.runtime.llm_client import LLMClient
@@ -43,6 +43,7 @@ from labelkit.orchestration.orchestrator import (
     Orchestrator, RunServices, RunSummary, estimate_run,
 )
 from labelkit.orchestration.runtime import (
+    estimate_project,
     execute_run,
     validate_project,
     validate_project_result,
@@ -3460,6 +3461,66 @@ def test_validate_project_result_is_silent_and_returns_all_diagnostics(
     assert any("schema_version: expected 1, got 2" in error for error in invalid.errors)
     assert any("future_key: unknown key" in warning for warning in invalid.warnings)
     assert capsys.readouterr() == ("", "")
+
+
+def test_estimate_project_is_structured_read_only_and_uses_frozen_formula(
+        tmp_path, monkeypatch, capsys):
+    """P1.3: one input scan, no LLM construction, output channel or stderr parsing."""
+    monkeypatch.setenv("LABELKIT_ORCH_TEST_KEY", "test-key")
+    config, project, _ = _write_console_pair(tmp_path)
+    validation = validate_project_result(config, project)
+    assert validation.config is not None
+    cfg = validation.config
+    before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+
+    def no_llm(*_args, **_kwargs):
+        pytest.fail("estimate API must not construct an LLM client")
+
+    monkeypatch.setattr(LLMClient, "__init__", no_llm)
+    estimate = estimate_project(cfg)
+
+    after = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+    assert after == before
+    assert capsys.readouterr() == ("", "")
+    assert estimate.config_digest == cfg.config_digest
+    assert estimate.project_digest == cfg.project_digest
+    assert (estimate.mode, estimate.modality) == ("process", "text")
+    assert (estimate.records, estimate.batches) == (2, 1)
+    assert tuple(estimate.calls) == _EST_KEYS[2:-1]
+    assert estimate.total_calls == sum(estimate.calls.values())
+    assert estimate.assumptions[0] == "excludes_retries_and_repairs"
+    assert tuple(estimate.as_legacy_mapping()) == _EST_KEYS
+
+
+def test_estimate_project_generate_only_never_scans_input(tmp_path, monkeypatch):
+    """generate_only 数量公式只依赖已解析配置，不实例化 M2。"""
+    from labelkit.operators import ingest as ingest_mod
+
+    cfg = make_cfg(
+        tmp_path,
+        mode="generate_only",
+        batch_size=4,
+        generate=GenerateConfig(enabled=True, instruction="生成", standalone_count=5),
+    )
+    monkeypatch.setattr(
+        ingest_mod.Ingestor,
+        "__init__",
+        lambda *_a, **_kw: pytest.fail("generate_only estimate must not construct Ingestor"),
+    )
+
+    estimate = estimate_project(cfg)
+
+    assert estimate.mode == "generate_only"
+    assert estimate.records > 0
+    assert estimate.calls["generate_calls"] > 0
+
+
+def test_estimate_project_preserves_typed_input_failures(tmp_path):
+    cfg = make_cfg(tmp_path)
+    missing = replace(cfg, run=replace(cfg.run, input=str(tmp_path / "missing.jsonl")))
+
+    with pytest.raises(InputError, match="input path does not exist"):
+        estimate_project(missing)
 
 
 # ── tests: v1.11 context budget (SPEC-context-budget V12/V13/V19, spec 3.10.3

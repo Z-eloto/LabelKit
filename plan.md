@@ -1047,3 +1047,21 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 边界：本批只结构化本地 M1 配置校验；`validate --probe` 的真实端点探测仍沿用既有 API，estimate、execute 和 artifact paths 尚未接入结构化返回。
 
 判定：P1.2 达到“Agent 可直接消费校验结果、CLI 输出逐字节不变”的验收条件；下一步执行 P1.3，暴露结构化 estimate API，使 Agent 不再解析 dry-run stderr。
+
+### 2026-08-23：P1.3 结构化 estimate API
+
+状态：**完成。**
+
+已完成：
+
+- 新增冻结的 `RunEstimate`，结构化携带 config/project digest、mode、modality、records、batches、十类 calls、total_calls 与 assumptions；
+- 冻结四值 `EstimateAssumption` 词表，显式表达“不含重试与修复”、按类覆盖/multi 下界、stream 下游 sessions 下界和 segment 最坏预算装填上界；
+- 新增 `estimate_project(cfg)`：直接消费 P1.2 返回的已校验 `ResolvedConfig`，process 模式只执行一次 `scan(estimate=True)`，generate_only 模式不构造 Ingestor；
+- 新 API 与既有 dry-run、rich 面板继续共用 `estimate_run()` 数量公式，并把 dry-run 注记判定收敛到同一机器可读 assumptions 事实源；
+- 新 API 不构造 `LLMClient`、Emitter、trace 或 report 通道，不写输出文件、不打印控制台文本；输入缺失或不可读继续以类型化 `InputError` 传播；
+- 增加 digest、冻结词表、调用键序、legacy mapping、单次只读扫描、零产物、零 LLM、generate_only 零扫描和输入失败测试；生产代码新增 123 行，处于 P1.3 的 100–220 行建议范围；
+- 直接契约测试通过：14 passed；orchestrator/console 回归通过：203 passed、3 skipped；完整离线套件通过：2158 passed、3 skipped、49 deselected；冻结布局/依赖方向、secret scan、`py_compile` 与 `git diff --check` 均通过。
+
+边界：现有静态事实源只估算记录、批次和调用次数，因此本批不虚构 token 或费用数值；价格/预算风险将在后续工具层基于明确的模型价格与预算配置增量实现。原有 `--dry-run` 仍保留 report/trace 和逐字节控制台行为。
+
+判定：P1.3 达到“Agent 可直接消费估算且不解析 stderr、不触发付费或产物写入”的验收条件；下一步执行 P1.4，暴露结构化 execute API 并返回 summary 与 artifact paths。
