@@ -79,6 +79,9 @@ cli_main = importlib.import_module("labelkit.cli.main")
 
 EXPECTED_PRODUCTION_PY = {
     "labelkit/__init__.py",
+    "labelkit/agent/__init__.py",
+    "labelkit/agent/tools/__init__.py",
+    "labelkit/agent/tools/contracts.py",
     "labelkit/cli/__init__.py",
     "labelkit/cli/commands.py",
     "labelkit/cli/console.py",
@@ -128,6 +131,7 @@ EXPECTED_PRODUCTION_PY = {
 }
 
 EXPECTED_TEST_PY = {
+    "tests/agent/test_tool_contracts.py",
     "tests/cli/test_cli.py",
     "tests/cli/test_console.py",
     "tests/common/config/test_config.py",

@@ -1117,3 +1117,20 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2189 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P1.6 达到“UI 配对、stream 会话与时间摘要正确，且只读无泄露”的验收条件；下一步进入 P2.1，定义 Agent `ToolSpec` / `ToolCall` / `ToolResult` 契约。
+
+### 2026-08-23：P2.1 Agent 工具边界契约
+
+状态：**完成。**
+
+已完成：
+
+- 新建供应商中立的 `labelkit.agent` 控制平面包，新增冻结的 `ToolSpec`、`ToolCall`、`ToolError` 与 `ToolResult` 纯数据契约，不包含 executor、Registry、Router、Policy、I/O 或 LLM；
+- `ToolSpec` 固定 name/description/risk/arguments_schema/result_schema 五字段，参数和成功结果 Schema 明确使用 Draft 2020-12 JSON Schema，执行器不进入 Planner 可见 spec；
+- 冻结 R0–R4 风险闭集；`ToolCall` 分离 `call_id` 发生身份与 `idempotency_key` 语义身份，为后续事件关联与恢复防重提供不混淆的契约；
+- `ToolResult` 冻结 `success|error` 二态辨别联合：success 恰有 output，error 恰有 `ToolError`；强制非空 call/tool 身份、非负有限耗时以及非空安全错误文案；
+- 错误闭集定为 unknown_tool、invalid_arguments、invalid_result、policy_denied、approval_required、budget_exceeded、duplicate_call、execution_failed、internal_error，使 Controller 后续无需解析 message 即可确定性收口；
+- 新增 `docs/dev/SPEC-agent-control-plane.md`，冻结风险、字段顺序、成功/错误互斥、Schema 信任边界与后续 Router/Policy 职责；`docs/CONTRACTS.md` 同步 Agent 与四层数据平面的单向依赖边界；
+- 工具契约直接测试 17 passed，契约+冻结包布局回归 88 passed；生产代码 152 行，处于 P2.1 的 80–180 行范围；
+- 完整离线套件通过：2206 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+
+判定：P2.1 达到“Schema 边界、结果互斥与错误闭集冻结”的验收条件；下一步执行 P2.2，建立只注册测试工具的 Registry/Router，确保未知工具、非法参数与非法结果永不跨越执行边界。

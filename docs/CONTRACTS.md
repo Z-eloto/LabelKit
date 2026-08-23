@@ -50,7 +50,10 @@ Ground rules for every implementer:
   surface `annotate.annotate_member` is NOT a fifth direction — it joins the §7.4 annotate
   repair-face family on the first leg). Orchestration may import common and
   operators. CLI imports orchestration's public entry points plus common error/config contracts,
-  and never imports or instantiates operators.
+  and never imports or instantiates operators. The optional Agent control plane is above the
+  data plane: `labelkit.agent` may import public orchestration/common contracts, but common,
+  operators, and orchestration never import Agent. Its P2.1 tool contracts are frozen in
+  `docs/dev/SPEC-agent-control-plane.md`.
 
 The same discipline as a dependency graph (the bullet above stays the normative wording;
 solid = layered production imports, dotted = the sanctioned lazy exceptions):
@@ -77,6 +80,11 @@ flowchart TD
 ```text
 labelkit/
 ├── __init__.py                         # __version__ and TOOL_VERSION only
+├── agent/
+│   ├── __init__.py                     # provider-neutral control-plane exports
+│   └── tools/
+│       ├── __init__.py                 # tool-boundary exports
+│       └── contracts.py                # P2.1 ToolSpec/Call/Error/Result data contracts
 ├── cli/
 │   ├── __init__.py                     # public exports: main, build_parser, exit_code_for
 │   ├── main.py                         # process entry, exception rendering, sole exit-code mapping
@@ -161,7 +169,8 @@ layered paths only.
 
 ### 1.2 Test ownership
 
-Offline tests physically mirror the production owners: contracts under `tests/common/contracts/`,
+Offline tests physically mirror the production owners: Agent contracts under `tests/agent/`,
+contracts under `tests/common/contracts/`,
 config under `tests/common/config/`, runtime under `tests/common/runtime/`, observability under
 `tests/common/observability/`, extensions under `tests/common/extensions/`, operators under
 `tests/operators/`, and orchestration under `tests/orchestration/`. Key-pool unit coverage belongs
@@ -210,7 +219,7 @@ A separate compatibility-import test,
 
 ## 2. Architecture recap (normative)
 
-Four physical layers (spec §2.2 and package-layer reorganization spec):
+The data plane retains four physical layers (spec §2.2 and package-layer reorganization spec):
 `labelkit.cli → labelkit.orchestration → labelkit.operators → labelkit.common`. Common contains
 cross-layer contracts and shared capabilities, not data-processing business logic: M1 config;
 M8/M9 under `common.runtime`; M12 under `common.observability`; user hooks under
@@ -227,7 +236,9 @@ the classify leg is v1.12's `classify_frames`). Orchestration may
 depend on common and operators and owns construction/order/lifecycle; CLI calls orchestration's
 public runtime entry points and owns only parsing, user interaction, and the sole exception-to-exit-
 code mapping. Common depends on neither operators nor orchestration; operators never depend on
-orchestration; CLI never imports operators.
+orchestration; CLI never imports operators. `labelkit.agent` is a separate optional control
+plane above public orchestration/common surfaces, not a fifth stage/data-plane layer; the data
+plane never imports it. P2.1 adds data contracts only and does not alter the pipeline graph below.
 
 Pipeline order per batch — the three chain forms (process superset / generation re-flow /
 `generate_only`):
