@@ -42,7 +42,11 @@ from labelkit.common.runtime.llm_client import LLMClient
 from labelkit.orchestration.orchestrator import (
     Orchestrator, RunServices, RunSummary, estimate_run,
 )
-from labelkit.orchestration.runtime import execute_run, validate_project
+from labelkit.orchestration.runtime import (
+    execute_run,
+    validate_project,
+    validate_project_result,
+)
 from labelkit.common.contracts.types import (
     Classification, DedupInfo, PipelineItem, QualityScore, Record, RecordRef,
     StageError,
@@ -3422,6 +3426,40 @@ def test_validate_project_overrides_passthrough(tmp_path, monkeypatch):
     # explicit rich resolves through M1's find_spec probe (rich is installed)
     cfg_rich = validate_project(config, project, CliOverrides(console="rich"))
     assert cfg_rich.console.mode_resolved == "rich"
+
+
+def test_validate_project_result_is_silent_and_returns_all_diagnostics(
+        tmp_path, monkeypatch, capsys):
+    """P1.2: library validation returns data, never rendered console text."""
+    monkeypatch.setenv("LABELKIT_ORCH_TEST_KEY", "test-key")
+    config, project, _ = _write_console_pair(tmp_path)
+
+    valid = validate_project_result(config, project, CliOverrides(limit=7))
+    assert valid.valid is True
+    assert valid.config is not None and valid.config.limit == 7
+    assert valid.errors == ()
+    assert any("context_window" in warning for warning in valid.warnings)
+    assert capsys.readouterr() == ("", "")
+
+    config.write_text(
+        config.read_text(encoding="utf-8").replace(
+            'log_level = "info"', 'log_level = "info"\nfuture_key = true', 1,
+        ),
+        encoding="utf-8",
+    )
+    project.write_text(
+        project.read_text(encoding="utf-8").replace(
+            "schema_version = 1", "schema_version = 2", 1,
+        ),
+        encoding="utf-8",
+    )
+
+    invalid = validate_project_result(config, project)
+    assert invalid.valid is False
+    assert invalid.config is None
+    assert any("schema_version: expected 1, got 2" in error for error in invalid.errors)
+    assert any("future_key: unknown key" in warning for warning in invalid.warnings)
+    assert capsys.readouterr() == ("", "")
 
 
 # ── tests: v1.11 context budget (SPEC-context-budget V12/V13/V19, spec 3.10.3

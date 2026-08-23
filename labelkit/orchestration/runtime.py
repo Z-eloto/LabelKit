@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from labelkit.common.config import load
+from labelkit.common.config import load, load_with_diagnostics
 from labelkit.common.config.model import CliOverrides, ResolvedConfig
 from labelkit.common.observability.obslog import EventLog, MetricsSink, setup_logging
 from labelkit.common.runtime.llm_client import LLMClient
@@ -21,6 +21,7 @@ from labelkit.common.runtime.schema_engine import SchemaEngine
 from labelkit.orchestration.factory import build_stages
 from labelkit.orchestration.orchestrator import Orchestrator, RunServices
 from labelkit.orchestration.profile_usage import referenced_profiles
+from labelkit.orchestration.results import ValidationResult
 from labelkit.operators.emitter import Emitter
 
 if TYPE_CHECKING:
@@ -29,7 +30,12 @@ if TYPE_CHECKING:
     from labelkit.common.config.model import TraceConfig
     from labelkit.operators.ingest import Ingestor
 
-__all__ = ["execute_run", "probe_referenced_profiles", "validate_project"]
+__all__ = [
+    "execute_run",
+    "probe_referenced_profiles",
+    "validate_project",
+    "validate_project_result",
+]
 
 _log = logging.getLogger("labelkit.runtime")
 
@@ -153,6 +159,29 @@ def validate_project(
     @return: 已解析配置
     """
     return load(Path(config_path), Path(project_path), overrides)
+
+
+def validate_project_result(
+    config_path: str | Path,
+    project_path: str | Path,
+    overrides: CliOverrides = CliOverrides(),
+) -> ValidationResult:
+    """完整校验配置并返回不含控制台渲染的结构化结果。
+
+    此入口不打印 warning，也不把配置错误转换为异常；调用方可直接读取完整的 errors 与
+    warnings。文件读取等未归类为配置诊断的内部异常仍正常传播。
+
+    @return: 成功时携带 ResolvedConfig；失败时 config 为 None 且 errors 非空
+    """
+    cfg, errors, warnings = load_with_diagnostics(
+        Path(config_path), Path(project_path), overrides,
+    )
+    return ValidationResult(
+        valid=not errors,
+        config=cfg,
+        errors=errors,
+        warnings=warnings,
+    )
 
 
 def probe_referenced_profiles(cfg: ResolvedConfig) -> tuple["ProbeResult", ...]:

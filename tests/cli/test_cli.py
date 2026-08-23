@@ -69,6 +69,7 @@ from labelkit.common.errors import (
 from labelkit.common.runtime.llm_client import LLMClient, ProbeResult
 from labelkit.orchestration.factory import build_stages
 from labelkit.orchestration.profile_usage import referenced_profiles
+from labelkit.orchestration.results import ValidationResult
 from labelkit.orchestration.runtime import execute_run, probe_referenced_profiles
 
 # labelkit.cli 把 main 这个**函数**导出到包命名空间，遮住了同名子模块——兜底出口
@@ -1021,14 +1022,25 @@ def _validate_args(*extra: str):
         ["validate", "--config", "c.toml", "--project", "p.toml", *extra])
 
 
+def _validation(cfg: ResolvedConfig | None = None, *, errors=(), warnings=()):
+    """构造 CLI 渲染测试使用的结构化校验结果。"""
+    return ValidationResult(
+        valid=not errors,
+        config=cfg if not errors else None,
+        errors=tuple(errors),
+        warnings=tuple(warnings),
+    )
+
+
 def test_validate_probe_prints_one_line_per_result_when_not_rich_tty(
         monkeypatch, capsys):
     """U13：非 rich 档保持行式输出（脚本消费不破坏）——`probe {label}: ok
     model=… latency_ms=…` / `probe {label}: FAIL {error}`，label 在有 key_env
     时为 `profile[key_env]`；退出码 0。"""
     seen: list = []
-    monkeypatch.setattr(cli_commands, "validate_project",
-                        lambda *a, **kw: seen.append(kw["overrides"]) or _cfg())
+    monkeypatch.setattr(cli_commands, "validate_project_result",
+                        lambda *a, **kw: seen.append(kw["overrides"])
+                        or _validation(_cfg()))
     monkeypatch.setattr(cli_commands, "probe_referenced_profiles",
                         lambda cfg: _PROBE_RESULTS)
 
@@ -1043,8 +1055,8 @@ def test_validate_probe_renders_the_rich_table_when_rich_and_tty(monkeypatch):
     """U13：rich 档 × stdout 为 TTY 走表格，并**提前返回**——同一批结果不再逐行
     重复打印一遍。"""
     _pin_terminal(monkeypatch)
-    monkeypatch.setattr(cli_commands, "validate_project", lambda *a, **kw: _cfg(
-        console=ConsoleConfig(mode="rich", mode_resolved="rich")))
+    monkeypatch.setattr(cli_commands, "validate_project_result", lambda *a, **kw: _validation(
+        _cfg(console=ConsoleConfig(mode="rich", mode_resolved="rich"))))
     monkeypatch.setattr(cli_commands, "probe_referenced_profiles",
                         lambda cfg: _PROBE_RESULTS)
     fake_out = _TtyStdout()
@@ -1061,8 +1073,8 @@ def test_validate_probe_renders_the_rich_table_when_rich_and_tty(monkeypatch):
 def test_validate_probe_falls_back_to_lines_when_rich_is_unimportable(monkeypatch):
     """U21：mode_resolved 只做过 find_spec 探测——rich 实际装坏时表格返回 False，
     调用方回落逐行 plain（退出码不变）。"""
-    monkeypatch.setattr(cli_commands, "validate_project", lambda *a, **kw: _cfg(
-        console=ConsoleConfig(mode="rich", mode_resolved="rich")))
+    monkeypatch.setattr(cli_commands, "validate_project_result", lambda *a, **kw: _validation(
+        _cfg(console=ConsoleConfig(mode="rich", mode_resolved="rich"))))
     monkeypatch.setattr(cli_commands, "probe_referenced_profiles",
                         lambda cfg: _PROBE_RESULTS)
     monkeypatch.setitem(sys.modules, "rich.table", None)
@@ -1075,7 +1087,8 @@ def test_validate_probe_falls_back_to_lines_when_rich_is_unimportable(monkeypatc
 
 def test_validate_without_probe_makes_no_probe_calls(monkeypatch, capsys):
     """无 `--probe` 时只做 M1 全量校验：零探测调用、stdout 一字不出。"""
-    monkeypatch.setattr(cli_commands, "validate_project", lambda *a, **kw: _cfg())
+    monkeypatch.setattr(cli_commands, "validate_project_result",
+                        lambda *a, **kw: _validation(_cfg()))
     monkeypatch.setattr(cli_commands, "probe_referenced_profiles",
                         lambda cfg: pytest.fail("probe must not run"))
 
@@ -1083,6 +1096,35 @@ def test_validate_without_probe_makes_no_probe_calls(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert "configuration valid" in captured.err
+
+
+def test_validate_renders_structured_warnings_byte_for_byte(monkeypatch, capsys):
+    warning = "c.toml:[tool].future_key: unknown key"
+    monkeypatch.setattr(
+        cli_commands,
+        "validate_project_result",
+        lambda *a, **kw: _validation(_cfg(), warnings=(warning,)),
+    )
+
+    assert cli_commands._cmd_validate(_validate_args()) == EXIT_OK
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"warning: {warning}\nconfiguration valid\n"
+
+
+def test_validate_raises_structured_errors_after_rendering_warnings(monkeypatch, capsys):
+    error = "p.toml:schema_version: expected 1, got 2"
+    warning = "c.toml:[tool].future_key: unknown key"
+    monkeypatch.setattr(
+        cli_commands,
+        "validate_project_result",
+        lambda *a, **kw: _validation(errors=(error,), warnings=(warning,)),
+    )
+
+    with pytest.raises(ConfigError) as excinfo:
+        cli_commands._cmd_validate(_validate_args())
+    assert excinfo.value.errors == [error]
+    assert capsys.readouterr().err == f"warning: {warning}\n"
 
 
 def test_print_probe_table_renders_five_columns(monkeypatch):

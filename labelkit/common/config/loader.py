@@ -44,7 +44,7 @@ from labelkit.common.config.model import (
 )
 from labelkit.common.errors import ConfigError
 
-__all__ = ["load", "default_rubric"]
+__all__ = ["load", "load_with_diagnostics", "default_rubric"]
 
 # v1.10 (spec 3.1.4 console 行 / §7.7): rich 可导入性探针**只**用 find_spec——装载器
 # 从不真正 import rich(惰性导入是 CLI 层的事, U4/U21)。模块级别名以便离线测试注入探针。
@@ -207,16 +207,10 @@ def _assemble(ctx: _LoadCtx, head: _ToolSide, products: _Products,
     )
 
 
-def load(config_path: Path, project_path: Path,
-         cli_overrides: CliOverrides) -> ResolvedConfig:
-    """三源合并 + 完整校验(M1 的唯一公开入口)。
+def _collect_load(config_path: Path, project_path: Path,
+                  cli_overrides: CliOverrides) -> tuple[ResolvedConfig | None, _Collector]:
+    """执行完整 M1 装载，但把诊断留在内存中供不同调用面处理。"""
 
-    @param config_path config.toml 路径
-    @param project_path project.toml 路径
-    @param cli_overrides CLI 覆盖值(优先级最高)
-    @return 冻结的 ``ResolvedConfig``
-    @raises ConfigError 携带**全部**错误(绝非首错即抛); CLI 据此退出码 2
-    """
     col = _Collector()
     fc, fp = str(config_path), str(project_path)
     config_raw, config_data = _read_toml(col, Path(config_path), fc)
@@ -227,8 +221,9 @@ def load(config_path: Path, project_path: Path,
                            embedding_profiles={}))
     project = _parse_project_file(col, fp, project_data) if project_data is not None else None
     if project is None:
-        _flush_warnings(col)
-        raise ConfigError(col.errors or [f"{fp}: config load failed"])
+        if not col.errors:
+            col.error(f"{fp}: config load failed")
+        return None, col
     ctx = _LoadCtx(col=col, fc=fc, fp=fp, cli=cli_overrides,
                    config_ok=config_data is not None, llm_profiles=head.llm_profiles,
                    embedding_profiles=head.embedding_profiles, p=project,
@@ -237,7 +232,37 @@ def load(config_path: Path, project_path: Path,
     products = _Products()
     ctx = validate(ctx, products)
     verdict = _resolve_console(ctx, head)
+    if col.errors:
+        return None, col
+    return _assemble(ctx, head, products, verdict, (config_raw, project_raw)), col
+
+
+def load_with_diagnostics(
+    config_path: Path,
+    project_path: Path,
+    cli_overrides: CliOverrides,
+) -> tuple[ResolvedConfig | None, tuple[str, ...], tuple[str, ...]]:
+    """加载配置并结构化返回全部错误与警告，不写 stdout/stderr。
+
+    @return ``(config, errors, warnings)``；存在错误时 config 为 None
+    """
+    cfg, col = _collect_load(config_path, project_path, cli_overrides)
+    return cfg, tuple(col.errors), tuple(col.warnings)
+
+
+def load(config_path: Path, project_path: Path,
+         cli_overrides: CliOverrides) -> ResolvedConfig:
+    """三源合并 + 完整校验(M1 的既有公开入口)。
+
+    @param config_path config.toml 路径
+    @param project_path project.toml 路径
+    @param cli_overrides CLI 覆盖值(优先级最高)
+    @return 冻结的 ``ResolvedConfig``
+    @raises ConfigError 携带**全部**错误(绝非首错即抛); CLI 据此退出码 2
+    """
+    cfg, col = _collect_load(config_path, project_path, cli_overrides)
     _flush_warnings(col)
     if col.errors:
         raise ConfigError(col.errors)
-    return _assemble(ctx, head, products, verdict, (config_raw, project_raw))
+    assert cfg is not None
+    return cfg

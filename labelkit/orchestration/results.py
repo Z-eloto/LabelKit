@@ -8,9 +8,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
-__all__ = ["RunArtifacts", "RunResult", "RunSummary"]
+if TYPE_CHECKING:
+    from labelkit.common.config.model import ResolvedConfig
+
+__all__ = ["RunArtifacts", "RunResult", "RunSummary", "ValidationResult"]
+
+
+@dataclass(frozen=True)
+class ValidationResult:
+    """Complete, non-rendered diagnostics from validating one project."""
+
+    valid: bool
+    config: "ResolvedConfig | None"
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)  # Existing shape, moved from orchestrator.py in P1.1.

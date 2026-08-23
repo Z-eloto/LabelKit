@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from labelkit.orchestration import RunArtifacts, RunResult, RunSummary
+from labelkit.orchestration import RunArtifacts, RunResult, RunSummary, ValidationResult
 from labelkit.orchestration.orchestrator import RunSummary as LegacyRunSummary
 from labelkit.orchestration.results import RunSummary as CanonicalRunSummary
 
@@ -55,6 +55,19 @@ def test_run_result_composes_identity_summary_and_artifacts(tmp_path):
     assert result.artifacts is artifacts
 
 
+def test_validation_result_carries_config_and_all_diagnostics():
+    result = ValidationResult(
+        valid=False,
+        config=None,
+        errors=("project.toml:schema_version: expected 1, got 2",),
+        warnings=("config.toml:[tool].future: unknown key",),
+    )
+
+    assert result.valid is False
+    assert result.config is None
+    assert len(result.errors) == len(result.warnings) == 1
+
+
 @pytest.mark.parametrize("factory", [
     lambda tmp: _summary(),
     lambda tmp: RunArtifacts(report=tmp / "output.report.json"),
@@ -63,6 +76,7 @@ def test_run_result_composes_identity_summary_and_artifacts(tmp_path):
         summary=_summary(),
         artifacts=RunArtifacts(report=tmp / "output.report.json"),
     ),
+    lambda tmp: ValidationResult(valid=True, config=None),
 ])
 def test_result_contracts_are_frozen(factory, tmp_path):
     value = factory(tmp_path)

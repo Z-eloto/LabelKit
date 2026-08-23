@@ -1029,3 +1029,21 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 边界：本批只有数据类型与导出位置变化；`execute_run()` 仍返回退出码，`validate_project()` 仍返回 `ResolvedConfig`，CLI 输出、异常映射、文件交付和运行行为均未改变。结构化对象的构造与接线留给 P1.2–P1.4。
 
 判定：P1.1 达到“只有数据类型、无行为变化”的验收条件；下一步执行 P1.2，暴露结构化 validate API 并保持 CLI 输出逐字节不变。
+
+### 2026-08-23：P1.2 结构化 validate API
+
+状态：**完成。**
+
+已完成：
+
+- 新增冻结的 `ValidationResult`，稳定暴露 `valid`、`config`、`errors` 与 `warnings` 四个字段；
+- 将 M1 配置装载拆为单次 `_collect_load()` 事实源：`load_with_diagnostics()` 返回内存诊断且不写控制台，既有 `load()` 继续按原格式打印 warning 并聚合抛出 `ConfigError`；
+- 新增库级 `validate_project_result()`，配置有效时返回 `ResolvedConfig`，无效时返回全部 errors/warnings，不 `sys.exit`、不要求调用方解析 stderr；
+- `validate` CLI 改为结构化 API 的薄渲染层，仍按原顺序输出 `warning: ...`、`configuration valid`，并把无效结果还原为同一 `ConfigError` 与退出码映射；
+- 保留既有 `validate_project()` 的返回、warning 和异常行为，并继续支持默认及显式 `CliOverrides`；
+- 新增有效、无效、聚合诊断、静默库调用、冻结结果、CLI warning 逐字节和旧入口兼容测试；生产代码新增 106 行，处于 P1.2 的 80–180 行建议范围；
+- 直接回归通过：567 passed；完整离线套件通过：2152 passed、3 skipped、49 deselected；架构依赖/冻结布局、secret scan、`py_compile` 与 `git diff --check` 均通过。
+
+边界：本批只结构化本地 M1 配置校验；`validate --probe` 的真实端点探测仍沿用既有 API，estimate、execute 和 artifact paths 尚未接入结构化返回。
+
+判定：P1.2 达到“Agent 可直接消费校验结果、CLI 输出逐字节不变”的验收条件；下一步执行 P1.3，暴露结构化 estimate API，使 Agent 不再解析 dry-run stderr。

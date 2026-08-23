@@ -7,11 +7,11 @@ import sys
 from importlib import resources
 
 from labelkit.common.config.model import CliOverrides
-from labelkit.common.errors import EXIT_OK
+from labelkit.common.errors import EXIT_OK, ConfigError
 from labelkit.orchestration.runtime import (
     execute_run,
     probe_referenced_profiles,
-    validate_project,
+    validate_project_result,
 )
 
 from .console import ConsoleRenderer
@@ -42,8 +42,17 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     """
     # v1.10（U27）：--console 在 validate 路径同样抵达 M1（jsonl × 显式 rich
     # 的 WARN 也在这里触发）。validate 命名空间没有 run 专属字段，覆盖项内联构造。
-    cfg = validate_project(args.config, args.project,
-                           overrides=CliOverrides(console=args.console))
+    result = validate_project_result(
+        args.config,
+        args.project,
+        overrides=CliOverrides(console=args.console),
+    )
+    for warning in result.warnings:
+        print(f"warning: {warning}", file=sys.stderr)
+    if not result.valid:
+        raise ConfigError(list(result.errors))
+    assert result.config is not None
+    cfg = result.config
     print("configuration valid", file=sys.stderr)
 
     if args.probe:

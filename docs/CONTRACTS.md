@@ -4055,6 +4055,14 @@ class RunResult:
     artifacts: RunArtifacts
 
 
+@dataclass(frozen=True)                            # [FROZEN HERE — Phase 1]
+class ValidationResult:
+    valid: bool
+    config: ResolvedConfig | None
+    errors: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
 @dataclass(frozen=True)                            # [FROZEN HERE — 2026-08-14]
 class RunServices:
     """The orchestrator's shared runtime services and run identity, as ONE parameter object.
@@ -4081,6 +4089,13 @@ class Orchestrator:
 
     async def run(self) -> RunSummary: ...
 ```
+
+`validate_project_result(config_path, project_path, overrides)` performs the same complete M1
+validation as `validate_project`, but returns `ValidationResult` without printing warnings or
+raising `ConfigError` for collected configuration errors. The legacy `validate_project` API keeps
+its existing return/raise/render behavior. The CLI is a thin renderer over the structured result:
+warnings retain the exact `warning: {message}` stderr form, invalid results are re-raised as the
+same aggregated `ConfigError`, and successful validation still prints `configuration valid`.
 
 Normative behavior: split `ingestor.records()` into batches of `run.batch_size` (`--limit`
 truncates the stream to the first N records); wrap into `PipelineItem`s; per batch, per enabled
