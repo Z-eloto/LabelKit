@@ -20,17 +20,25 @@ EstimateAssumption = Literal[
 ]
 JsonValueKind = Literal["null", "boolean", "integer", "number", "string", "array", "object"]
 SensitivePattern = Literal["email_like", "phone_like", "cn_id_like", "credential_like"]
+SessionCloseCause = Literal["gap", "key", "max_len", "max_span", "eof", "limit"]
 __all__ = [
     "EstimateAssumption",
     "JsonValueKind",
+    "IntegerDistribution",
+    "InputProfile",
     "RunArtifacts",
     "RunEstimate",
     "RunResult",
     "RunSummary",
     "SensitivePattern",
+    "SessionCloseCause",
+    "StreamInputProfile",
     "TextFieldProfile",
     "TextInputProfile",
     "TextLengthProfile",
+    "TimeRangeProfile",
+    "UIInputProfile",
+    "UIPairingProfile",
     "ValidationResult",
 ]
 
@@ -110,6 +118,81 @@ class TextInputProfile:
     duplicate_texts: int
     duplicate_rate: float
     sensitive_record_counts: Mapping[SensitivePattern, int]
+
+
+@dataclass(frozen=True)
+class IntegerDistribution:
+    """Aggregate distribution for bounded, non-negative integer samples."""
+
+    minimum: int
+    maximum: int
+    mean: float
+    p50: int
+    p95: int
+
+
+@dataclass(frozen=True)
+class UIPairingProfile:
+    """Visited UI pair/index counts without per-index locations."""
+
+    estimated_pairs: int
+    scanned_indices: int
+    sampled_pairs: int
+    bad_pairs: int
+    missing_pairs: int
+    index_conflicts: int
+
+
+@dataclass(frozen=True)
+class UIInputProfile:
+    """Bounded, content-free profile of paired UI tree/image input."""
+
+    config_digest: str
+    project_digest: str
+    files: tuple[str, ...]
+    sample_limit: int
+    sample_complete: bool
+    pairing: UIPairingProfile
+    tree_nodes: IntegerDistribution
+    image_bytes: IntegerDistribution
+
+
+@dataclass(frozen=True)
+class TimeRangeProfile:
+    """Parsed time-key coverage and range for a stream sample."""
+
+    order_by: str
+    parsed_frames: int
+    minimum_epoch_s: float | None
+    maximum_epoch_s: float | None
+    span_s: float | None
+
+
+@dataclass(frozen=True)
+class StreamInputProfile:
+    """Bounded profile produced by the execution session state machine."""
+
+    config_digest: str
+    project_digest: str
+    modality: Literal["text", "ui"]
+    files: tuple[str, ...]
+    estimated_frames: int
+    sample_limit: int
+    scanned_inputs: int
+    sampled_frames: int
+    bad_input: int
+    disorder: int
+    sample_complete: bool
+    session_count: int
+    session_lengths: IntegerDistribution | None
+    close_causes: Mapping[SessionCloseCause, int]
+    time_range: TimeRangeProfile | None
+    pairing: UIPairingProfile | None
+    tree_nodes: IntegerDistribution | None
+    image_bytes: IntegerDistribution | None
+
+
+InputProfile = TextInputProfile | UIInputProfile | StreamInputProfile
 
 
 @dataclass(frozen=True)  # Existing shape, moved from orchestrator.py in P1.1.

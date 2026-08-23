@@ -4188,6 +4188,24 @@ locations, matched values, or per-record hashes. It constructs no `LLMClient`, `
 report, or output channel and prints no console text. UI modality and generate-only are rejected
 as API misuse; UI pairing and stream/session/time summaries belong to the separate P1.6 profile.
 
+`profile_input(cfg, sample_limit=1000)` is the process-mode dispatcher over the P1.5 text
+profile and the P1.6 UI/stream profiles. With stream disabled, UI input is parsed through the
+real M2 pairing/record path and returns only aggregate matched/bad/missing/conflicting-index
+counts plus node-count and image-byte distributions. `scanned_indices` includes visited anomaly
+indices as well as visited pairs; `estimated_pairs` counts only unambiguous matched pairs, and
+`sample_complete` compares both populations so anomaly-only indices cannot create a false
+complete result.
+
+With `segment.enabled`, both modalities are consumed by `Ingestor.sessions()` under a profile-
+owned frame limit. Session lengths and the closed `gap|key|max_len|max_span|eof|limit` cause
+vocabulary therefore share the exact execution state machine; an exactly exhausted sample is
+reported as `eof` only when the complete scan proves no input remains. Text `meta:*` streams also
+return parsed-frame coverage and min/max/span epoch seconds after disorder policy; input-order
+streams return no time range. UI streams retain pairing and media distributions. All stream bad
+input/disorder policies remain active, while profile-only limit/disorder warnings are suppressed.
+As with P1.5, no raw JSON, text/tree content, record/session IDs, per-record locations or hashes
+are returned, and no LLM, emitter, trace/report/output channel or console text is created.
+
 `execute_project(config_path, project_path, overrides, listener=None)` owns the same runtime
 object graph and side effects as the historical run entry point, but returns `RunResult` instead
 of reducing the outcome to an integer. `RunArtifacts` is assembled from channel lifecycle state,

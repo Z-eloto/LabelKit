@@ -1,19 +1,26 @@
 """Canonical orchestration layer exports."""
 
 from labelkit.orchestration.factory import build_stages
-from labelkit.orchestration.input_profile import profile_text_input
+from labelkit.orchestration.input_profile import profile_input, profile_text_input
 from labelkit.orchestration.orchestrator import Orchestrator, RunServices, RunSummary
 from labelkit.orchestration.profile_usage import referenced_profiles
 from labelkit.orchestration.results import (
     EstimateAssumption,
+    InputProfile,
+    IntegerDistribution,
     JsonValueKind,
     RunArtifacts,
     RunEstimate,
     RunResult,
     SensitivePattern,
+    SessionCloseCause,
+    StreamInputProfile,
     TextFieldProfile,
     TextInputProfile,
     TextLengthProfile,
+    TimeRangeProfile,
+    UIInputProfile,
+    UIPairingProfile,
     ValidationResult,
 )
 from labelkit.orchestration.runtime import (
@@ -28,6 +35,8 @@ from labelkit.orchestration.runtime import (
 __all__ = [
     "Orchestrator",
     "EstimateAssumption",
+    "InputProfile",
+    "IntegerDistribution",
     "JsonValueKind",
     "RunServices",
     "RunArtifacts",
@@ -35,15 +44,21 @@ __all__ = [
     "RunResult",
     "RunSummary",
     "SensitivePattern",
+    "SessionCloseCause",
+    "StreamInputProfile",
     "TextFieldProfile",
     "TextInputProfile",
     "TextLengthProfile",
+    "TimeRangeProfile",
+    "UIInputProfile",
+    "UIPairingProfile",
     "ValidationResult",
     "build_stages",
     "estimate_project",
     "execute_project",
     "execute_run",
     "probe_referenced_profiles",
+    "profile_input",
     "profile_text_input",
     "referenced_profiles",
     "validate_project",

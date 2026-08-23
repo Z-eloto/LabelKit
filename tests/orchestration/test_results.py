@@ -9,15 +9,21 @@ import pytest
 
 from labelkit.orchestration import (
     EstimateAssumption,
+    IntegerDistribution,
     JsonValueKind,
     RunArtifacts,
     RunEstimate,
     RunResult,
     RunSummary,
     SensitivePattern,
+    SessionCloseCause,
+    StreamInputProfile,
     TextFieldProfile,
     TextInputProfile,
     TextLengthProfile,
+    TimeRangeProfile,
+    UIInputProfile,
+    UIPairingProfile,
     ValidationResult,
     execute_project,
 )
@@ -147,10 +153,53 @@ def test_text_profile_vocabularies_and_shapes_are_closed():
     ]
 
 
+def test_ui_and_stream_profile_vocabularies_and_shapes_are_closed():
+    assert get_args(SessionCloseCause) == (
+        "gap", "key", "max_len", "max_span", "eof", "limit",
+    )
+    assert [field.name for field in dataclasses.fields(IntegerDistribution)] == [
+        "minimum", "maximum", "mean", "p50", "p95",
+    ]
+    assert [field.name for field in dataclasses.fields(UIPairingProfile)] == [
+        "estimated_pairs", "scanned_indices", "sampled_pairs", "bad_pairs",
+        "missing_pairs", "index_conflicts",
+    ]
+    assert [field.name for field in dataclasses.fields(UIInputProfile)] == [
+        "config_digest", "project_digest", "files", "sample_limit",
+        "sample_complete", "pairing", "tree_nodes", "image_bytes",
+    ]
+    assert [field.name for field in dataclasses.fields(TimeRangeProfile)] == [
+        "order_by", "parsed_frames", "minimum_epoch_s", "maximum_epoch_s", "span_s",
+    ]
+    assert [field.name for field in dataclasses.fields(StreamInputProfile)] == [
+        "config_digest", "project_digest", "modality", "files",
+        "estimated_frames", "sample_limit", "scanned_inputs", "sampled_frames",
+        "bad_input", "disorder", "sample_complete", "session_count",
+        "session_lengths", "close_causes", "time_range", "pairing",
+        "tree_nodes", "image_bytes",
+    ]
+
+
 @pytest.mark.parametrize("factory", [
     lambda tmp: _summary(),
     lambda tmp: TextFieldProfile("text", 1, 0, ("string",)),
     lambda tmp: TextLengthProfile(1, 1, 1.0, 1, 1),
+    lambda tmp: IntegerDistribution(1, 1, 1.0, 1, 1),
+    lambda tmp: UIPairingProfile(1, 1, 1, 0, 0, 0),
+    lambda tmp: TimeRangeProfile("meta:ts", 1, 1.0, 1.0, 0.0),
+    lambda tmp: UIInputProfile(
+        "c", "p", (), 1, True,
+        UIPairingProfile(1, 1, 1, 0, 0, 0),
+        IntegerDistribution(1, 1, 1.0, 1, 1),
+        IntegerDistribution(8, 8, 8.0, 8, 8),
+    ),
+    lambda tmp: StreamInputProfile(
+        "c", "p", "text", (), 1, 1, 1, 1, 0, 0, True, 1,
+        IntegerDistribution(1, 1, 1.0, 1, 1),
+        {"gap": 0, "key": 0, "max_len": 0, "max_span": 0,
+         "eof": 1, "limit": 0},
+        None, None, None, None,
+    ),
     lambda tmp: RunArtifacts(report=tmp / "output.report.json"),
     lambda tmp: RunResult(
         run_id="abcdef012345",

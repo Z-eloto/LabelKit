@@ -1100,3 +1100,20 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2174 passed、3 skipped、49 deselected；secret scan、生产模块编译与 `git diff --check` 均通过。
 
 判定：P1.5 达到“不触发 LLM、不写产物、不泄露全文”的验收条件；下一步执行 P1.6，扩展 UI/stream 输入 profile，并复用本批的聚合与隐私契约。
+
+### 2026-08-23：P1.6 UI/stream 输入 profile
+
+状态：**完成。**
+
+已完成：
+
+- 新增统一 `profile_input(cfg, sample_limit=1000)` 入口：非 stream 文本复用 P1.5，UI 返回 `UIInputProfile`，`segment.enabled` 时返回 `StreamInputProfile`；generate_only 与 0/10001 等无界采样依旧拒绝；
+- UI 画像通过真实 M2 配对和解析路径生成，聚合命中对、访问 index、坏对、缺对、index 冲突，以及控件树节点数和图像字节数 min/max/mean/p50/p95；完成度同时纳入不在 matched-pair 估算中的异常 index；
+- stream 画像直接复用 `Ingestor.sessions()` 的 gap/key/max_len/max_span/eof/limit 状态机，返回会话数、长度分布、闭合原因、坏输入与乱序账本；采样预算恰好耗尽时，仅在全量 scan 证明已到真实 EOF 后把尾会话规一为 eof；
+- 文本 `meta:*` stream 只返回经乱序策略接受的时间帧数与 epoch min/max/span；UI stream 保留配对和媒体分布；input_order 不伪造时间范围；
+- 新增冻结的整数分布、UI 配对、UI 输入、时间范围和 stream 输入契约，闭合原因为受测试钉死的六值闭集，包级导出与 `docs/CONTRACTS.md` 同步；
+- 返回结果不含正文、原始 JSON、树文本、record/session ID、逐记录位置或哈希；profile 专用采样抑制 limit/disorder 控制台告警，但 fail/skip 策略与账本不变，不构造 LLMClient、Emitter 或 trace/report/output 通道；
+- 修改 4 个生产文件，生产代码净增 300 行，恰在 P1.6 的 100–300 行范围上限；直接 profile/result/ingest 回归 124 passed；
+- 完整离线套件通过：2189 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+
+判定：P1.6 达到“UI 配对、stream 会话与时间摘要正确，且只读无泄露”的验收条件；下一步进入 P2.1，定义 Agent `ToolSpec` / `ToolCall` / `ToolResult` 契约。

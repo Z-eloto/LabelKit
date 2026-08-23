@@ -10,11 +10,18 @@ from typing import Any
 
 from labelkit.common.config.model import ResolvedConfig
 from labelkit.orchestration.results import (
+    InputProfile,
+    IntegerDistribution,
     JsonValueKind,
     SensitivePattern,
+    SessionCloseCause,
+    StreamInputProfile,
     TextFieldProfile,
     TextInputProfile,
     TextLengthProfile,
+    TimeRangeProfile,
+    UIInputProfile,
+    UIPairingProfile,
 )
 from labelkit.operators.ingest import Ingestor
 
@@ -89,6 +96,170 @@ def _length_profile(lengths: list[int]) -> TextLengthProfile:
         p50=_percentile(ordered, 0.50),
         p95=_percentile(ordered, 0.95),
     )
+
+
+def _integer_distribution(values: list[int]) -> IntegerDistribution:
+    """Freeze aggregate integer statistics; individual values stay private."""
+    ordered = sorted(values)
+    return IntegerDistribution(
+        minimum=ordered[0],
+        maximum=ordered[-1],
+        mean=sum(ordered) / len(ordered),
+        p50=_percentile(ordered, 0.50),
+        p95=_percentile(ordered, 0.95),
+    )
+
+
+def _validate_request(cfg: ResolvedConfig, sample_limit: int) -> None:
+    """Reject unsupported/unbounded Agent-facing profile requests."""
+    if cfg.run.mode != "process":
+        raise ValueError("profile_input requires process mode")
+    if not 1 <= sample_limit <= _MAX_SAMPLE_LIMIT:
+        raise ValueError("sample_limit must be between 1 and 10000")
+
+
+def _pairing_profile(plan, report) -> UIPairingProfile:
+    """Convert M2 UI bookkeeping into aggregate pairing counts."""
+    bad_pairs = max(
+        0,
+        report.bad_input - report.missing_pair - report.index_conflict - report.disorder,
+    )
+    return UIPairingProfile(
+        estimated_pairs=plan.estimated_records,
+        scanned_indices=report.scanned,
+        sampled_pairs=report.ingested,
+        bad_pairs=bad_pairs,
+        missing_pairs=report.missing_pair,
+        index_conflicts=report.index_conflict,
+    )
+
+
+def _ui_sample_complete(plan, report) -> bool:
+    """Include anomaly-only indices omitted from the matched-pair estimate."""
+    total_indices = (
+        plan.estimated_records + report.missing_pair + report.index_conflict
+    )
+    return report.scanned >= total_indices
+
+
+def _profile_ui_input(cfg: ResolvedConfig, sample_limit: int) -> UIInputProfile:
+    """Profile non-stream UI input through the real paired-record iterator."""
+    ingestor = Ingestor(cfg)
+    plan = ingestor.scan(estimate=True)
+    tree_nodes: list[int] = []
+    image_bytes: list[int] = []
+    for record in ingestor.records():
+        if record.ui_tree is not None and record.image is not None:
+            tree_nodes.append(len(record.ui_tree.nodes))
+            image_bytes.append(record.image.size_bytes)
+        if len(tree_nodes) >= sample_limit:
+            break
+    report = ingestor.report
+    return UIInputProfile(
+        config_digest=cfg.config_digest,
+        project_digest=cfg.project_digest,
+        files=plan.files,
+        sample_limit=sample_limit,
+        sample_complete=_ui_sample_complete(plan, report),
+        pairing=_pairing_profile(plan, report),
+        tree_nodes=_integer_distribution(tree_nodes),
+        image_bytes=_integer_distribution(image_bytes),
+    )
+
+
+def _profile_stream_input(cfg: ResolvedConfig, sample_limit: int) -> StreamInputProfile:
+    """Profile stream input through the exact M2 session state machine."""
+    ingestor = Ingestor(cfg)
+    plan = ingestor.scan(estimate=True)
+    close_causes: dict[SessionCloseCause, int] = {
+        cause: 0 for cause in ("gap", "key", "max_len", "max_span", "eof", "limit")
+    }
+    session_lengths: list[int] = []
+    times: list[float] = []
+    tree_nodes: list[int] = []
+    image_bytes: list[int] = []
+    sampled_frames = 0
+    for session in ingestor.sessions(
+            frame_limit=sample_limit, quiet_warnings=True):
+        close_causes[session.cause] += 1
+        session_lengths.append(len(session.records))
+        for record in session.records:
+            sampled_frames += 1
+            order_key = ingestor.parse_record_order_key(record)
+            if order_key is not None:
+                times.append(order_key)
+            if record.ui_tree is not None and record.image is not None:
+                tree_nodes.append(len(record.ui_tree.nodes))
+                image_bytes.append(record.image.size_bytes)
+
+    report = ingestor.report
+    complete = (
+        report.scanned >= plan.estimated_records
+        if cfg.run.modality == "text"
+        else _ui_sample_complete(plan, report)
+    )
+    # A bounded iterator cannot peek past its budget. The complete scan proves
+    # that an exactly exhausted final sample was also the real EOF.
+    if complete and close_causes["limit"]:
+        close_causes["limit"] -= 1
+        close_causes["eof"] += 1
+    time_range = None
+    if cfg.stream.order_by.startswith("meta:"):
+        time_range = TimeRangeProfile(
+            order_by=cfg.stream.order_by,
+            parsed_frames=len(times),
+            minimum_epoch_s=min(times) if times else None,
+            maximum_epoch_s=max(times) if times else None,
+            span_s=(max(times) - min(times)) if times else None,
+        )
+    return StreamInputProfile(
+        config_digest=cfg.config_digest,
+        project_digest=cfg.project_digest,
+        modality=cfg.run.modality,
+        files=plan.files,
+        estimated_frames=plan.estimated_records,
+        sample_limit=sample_limit,
+        scanned_inputs=report.scanned,
+        sampled_frames=sampled_frames,
+        bad_input=report.bad_input,
+        disorder=report.disorder,
+        sample_complete=complete,
+        session_count=len(session_lengths),
+        session_lengths=(
+            _integer_distribution(session_lengths) if session_lengths else None
+        ),
+        close_causes=close_causes,
+        time_range=time_range,
+        pairing=(
+            _pairing_profile(plan, report) if cfg.run.modality == "ui" else None
+        ),
+        tree_nodes=_integer_distribution(tree_nodes) if tree_nodes else None,
+        image_bytes=_integer_distribution(image_bytes) if image_bytes else None,
+    )
+
+
+def profile_input(
+    cfg: ResolvedConfig,
+    *,
+    sample_limit: int = _DEFAULT_SAMPLE_LIMIT,
+) -> InputProfile:
+    """Return the modality/stream-specific bounded, read-only input profile.
+
+    This dispatcher constructs only M2 ingestion objects. It never creates an
+    LLM client, emitter, trace/report channel, or formal output artifact.
+
+    @param cfg: Validated process-mode project configuration.
+    @param sample_limit: Maximum valid records/frames, from 1 through 10,000.
+    @return: Frozen text, UI, or stream profile selected from the config.
+    @raises ValueError: Generate-only mode or an invalid sample limit.
+    @raises InputError: Existing M2 input and policy failures.
+    """
+    _validate_request(cfg, sample_limit)
+    if cfg.segment.enabled:
+        return _profile_stream_input(cfg, sample_limit)
+    if cfg.run.modality == "text":
+        return profile_text_input(cfg, sample_limit=sample_limit)
+    return _profile_ui_input(cfg, sample_limit)
 
 
 def profile_text_input(

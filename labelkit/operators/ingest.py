@@ -541,7 +541,8 @@ class Ingestor:
 
     # ── v1.8 stream 模式：会话流视图（spec 3.2.8、CONTRACTS §7.1）───────────
 
-    def sessions(self) -> Iterator[Session]:
+    def sessions(self, *, frame_limit: int | None = None,
+                 quiet_warnings: bool = False) -> Iterator[Session]:
         """v1.8（stream 模式）：M10 用来替代 records() 的会话流视图。
 
         管线：解析流（= records() 语义，含 stream.order_by 排序与按分区键的单调性
@@ -552,6 +553,8 @@ class Ingestor:
         前缀把它路由到 segment 通道，S1）并累加 IngestReport.sessions；--limit 截断
         按 EOF 处理，未闭合的尾会话以 cause="limit" 冲刷 + 一条 stderr WARN（S17）。
 
+        @param frame_limit 本次视图的帧上限；None 沿用 cfg.limit
+        @param quiet_warnings 只抑制 limit/disorder 提示，不改变策略或账本
         @return Session 迭代器
         @raises InputError 命中 "fail" 策略（含 stream.on_disorder = "fail"）
         """
@@ -561,19 +564,22 @@ class Ingestor:
                          meta=meta_field is not None)
         cursors: dict[tuple, float] = {}   # 按分区键各自维护的单调性游标（S19）
         buf: list[tuple[Record, float | None]] = []   # (记录, 序键)
-        stream, limit = self._limited_record_stream()
+        stream, limit = self._limited_record_stream(frame_limit)
 
         consumed = 0
         for rec in stream:
             consumed += 1
             order_key: float | None = None
             if meta_field is not None:
-                order_key = self._order_key_for(rec, meta_field)
+                order_key = self._order_key_for(
+                    rec, meta_field, quiet_warning=quiet_warnings)
                 if order_key is None:
                     continue
             part_key, boundary = self._stream_keys(rec.raw, rec.ref.source_file)
             if (meta_field is not None
-                    and not self._monotonic_ok(rec, part_key, order_key, cursors)):
+                    and not self._monotonic_ok(
+                        rec, part_key, order_key, cursors,
+                        quiet_warning=quiet_warnings)):
                 continue
             step = rec.ref.pair_index if modality == "ui" else rec.ref.line_no
             cause = asm.pre_close(boundary, order_key, step, rec.ref.source_file)
@@ -588,20 +594,25 @@ class Ingestor:
                 asm.reset()
 
         if buf:
-            yield self._flush_tail(buf, limit is not None and consumed == limit)
+            yield self._flush_tail(
+                buf, limit is not None and consumed == limit,
+                warn=not quiet_warnings,
+            )
 
-    def _limited_record_stream(self) -> tuple[Iterator[Record], int | None]:
+    def _limited_record_stream(
+            self, frame_limit: int | None = None) -> tuple[Iterator[Record], int | None]:
         """构造帧级 --limit 截断后的解析流（S17：limit 单位恒为帧，绝不是会话）。
 
         @return (记录迭代器, 帧预算 limit；未设 --limit 时预算为 None)
         """
-        limit = self._cfg.limit
+        limit = self._cfg.limit if frame_limit is None else frame_limit
         stream: Iterator[Record] = self.records()
         if limit is not None:
             stream = islice(stream, limit)
         return stream, limit
 
-    def _order_key_for(self, rec: Record, meta_field: str) -> float | None:
+    def _order_key_for(self, rec: Record, meta_field: str, *,
+                       quiet_warning: bool = False) -> float | None:
         """取本帧序键；解析失败按 stream.on_disorder 处置（S20）。
 
         @param rec 当前记录
@@ -614,11 +625,28 @@ class Ingestor:
         if order_key is None:
             detail = ("field missing" if raw_value is _MISS
                       else f"value {_clip(raw_value)} is unparseable")
-            self._disorder(rec, f"timestamp parse failure: meta:{meta_field} {detail}")
+            self._disorder(
+                rec, f"timestamp parse failure: meta:{meta_field} {detail}",
+                quiet_warning=quiet_warning)
         return order_key
 
+    def parse_record_order_key(self, rec: Record) -> float | None:
+        """Parse one record's configured meta order key without side effects.
+
+        This read face is used only after ``sessions()`` accepted the record,
+        so it never applies disorder policy or writes to the ingest report.
+
+        @return: Epoch seconds, or ``None`` for input-order/UI/unparseable data.
+        """
+        meta_field = self._meta_field()
+        if meta_field is None:
+            return None
+        raw_value = _lookup_raw(rec.raw, meta_field)
+        return None if raw_value is _MISS else _parse_order_key(raw_value)
+
     def _monotonic_ok(self, rec: Record, part_key: tuple, order_key: float,
-                      cursors: dict[tuple, float]) -> bool:
+                      cursors: dict[tuple, float], *,
+                      quiet_warning: bool = False) -> bool:
         """按分区键做单调性校验，通过则推进该分区游标（S19）。
 
         @param rec 当前记录
@@ -631,13 +659,14 @@ class Ingestor:
         cursor = cursors.get(part_key)
         if cursor is not None and order_key < cursor:
             self._disorder(
-                rec, f"out of order: timestamp {order_key} is below partition cursor {cursor}")
+                rec, f"out of order: timestamp {order_key} is below partition cursor {cursor}",
+                quiet_warning=quiet_warning)
             return False
         cursors[part_key] = order_key
         return True
 
     def _flush_tail(self, buf: list[tuple[Record, float | None]],
-                    at_budget: bool) -> Session:
+                    at_budget: bool, *, warn: bool = True) -> Session:
         """冲刷未闭合的尾会话。
 
         cause="limit" 陈述的是一个事实（--limit 预算恰在此闭合点耗尽）；其后是否
@@ -649,7 +678,7 @@ class Ingestor:
         @return 闭合后的 Session（cause = "limit" 或 "eof"）
         """
         session = self._close_session(buf, "limit" if at_budget else "eof")
-        if at_budget:
+        if at_budget and warn:
             _LOGGER.warning(
                 "tail session closed where the --limit budget was exhausted "
                 "(cause=limit; whether more input followed is unknown) "
@@ -732,7 +761,8 @@ class Ingestor:
             return rec.ref.pair_index
         return f"{rec.ref.source_file}:{rec.ref.line_no}"
 
-    def _disorder(self, rec: Record, reason: str) -> None:
+    def _disorder(self, rec: Record, reason: str, *,
+                  quiet_warning: bool = False) -> None:
         """S19/S20：被单调性校验拒绝的记录（乱序或时间戳解析失败）按
         stream.on_disorder 处置。
 
@@ -743,6 +773,7 @@ class Ingestor:
 
         @param rec 被拒记录
         @param reason 拒绝原因（含时间戳取值，只进 trace 通道）
+        @param quiet_warning 不打印 skip 策略的一次性提示，账本与 fail 不变
         @return 无
         @raises InputError stream.on_disorder = "fail"
         """
@@ -763,7 +794,7 @@ class Ingestor:
             loc = (f"{ref.source_file}:{line_no}" if text
                    else f"{ref.source_file} index={index}")
             raise InputError(f"{loc}: {reason} (stream.on_disorder = \"fail\")")
-        if not self._disorder_warned:
+        if not quiet_warning and not self._disorder_warned:
             self._disorder_warned = True
             # 按设计不含数据内容（spec §7.1 ①）：逐记录的 reason 里嵌着时间戳/游标
             # 取值，只留在 trace 通道。
