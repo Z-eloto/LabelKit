@@ -9,10 +9,15 @@ import pytest
 
 from labelkit.orchestration import (
     EstimateAssumption,
+    JsonValueKind,
     RunArtifacts,
     RunEstimate,
     RunResult,
     RunSummary,
+    SensitivePattern,
+    TextFieldProfile,
+    TextInputProfile,
+    TextLengthProfile,
     ValidationResult,
     execute_project,
 )
@@ -120,8 +125,32 @@ def test_estimate_assumption_vocabulary_is_closed():
     )
 
 
+def test_text_profile_vocabularies_and_shapes_are_closed():
+    assert get_args(JsonValueKind) == (
+        "null", "boolean", "integer", "number", "string", "array", "object",
+    )
+    assert get_args(SensitivePattern) == (
+        "email_like", "phone_like", "cn_id_like", "credential_like",
+    )
+    assert [field.name for field in dataclasses.fields(TextFieldProfile)] == [
+        "name", "present", "nulls", "kinds",
+    ]
+    assert [field.name for field in dataclasses.fields(TextLengthProfile)] == [
+        "minimum", "maximum", "mean", "p50", "p95",
+    ]
+    assert [field.name for field in dataclasses.fields(TextInputProfile)] == [
+        "config_digest", "project_digest", "text_field", "files",
+        "estimated_lines", "sample_limit", "sampled_lines", "sampled_records",
+        "bad_lines", "sample_complete", "fields", "fields_truncated",
+        "text_lengths", "duplicate_texts", "duplicate_rate",
+        "sensitive_record_counts",
+    ]
+
+
 @pytest.mark.parametrize("factory", [
     lambda tmp: _summary(),
+    lambda tmp: TextFieldProfile("text", 1, 0, ("string",)),
+    lambda tmp: TextLengthProfile(1, 1, 1.0, 1, 1),
     lambda tmp: RunArtifacts(report=tmp / "output.report.json"),
     lambda tmp: RunResult(
         run_id="abcdef012345",

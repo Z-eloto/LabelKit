@@ -1082,3 +1082,21 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2162 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P1.4 达到“返回 summary 与本轮真实 artifact paths，CLI 保持薄封装”的验收条件；下一步执行 P1.5，建立不触发 LLM、不泄露全文的文本输入只读 profile。
+
+### 2026-08-23：P1.5 文本输入只读 profile
+
+状态：**完成。**
+
+已完成：
+
+- 新增冻结的 `TextInputProfile`、`TextFieldProfile` 与 `TextLengthProfile`，以及 JSON 值类型和敏感模式两个闭集词表；
+- 新增 `profile_text_input(cfg, sample_limit=1000)`：先以 M2 `scan(estimate=True)` 获取完整文件清单和非空行估计，再通过真实 `records()` 路径解析最多 1–10000 条有效记录；
+- 画像结构化返回样本覆盖、坏行计数、顶层字段 presence/null/type、字符长度 min/max/mean/p50/p95、NFC+空白折叠后的精确重复数与重复率；
+- 敏感风险只返回 email/phone/中国身份证/credential-like 四类“命中记录数”，不返回命中值；手机号规则限制为 8–15 位并避免把 18 位身份证重复计作手机号；
+- 唯一字段名最多保留 256 个且优先保留配置的文本根字段，避免恶意宽对象导致无界状态；默认样本上限 1000，硬上限 10000；
+- 返回对象不含正文、原始 JSON、记录 ID、来源行号、匹配值或逐记录摘要；成功与失败路径都不构造 LLMClient、Emitter、trace、report 或正式输出，也不打印控制台文本；
+- UI 与 generate_only 明确拒绝，UI 配对、stream 会话和时间摘要留在 P1.6，避免本批混合两套输入语义；
+- 生产代码新增 249 行，处于 P1.5 的 100–250 行建议范围；直接 ingest/profile/contract/CLI 回归通过：180 passed；
+- 完整离线套件通过：2174 passed、3 skipped、49 deselected；secret scan、生产模块编译与 `git diff --check` 均通过。
+
+判定：P1.5 达到“不触发 LLM、不写产物、不泄露全文”的验收条件；下一步执行 P1.6，扩展 UI/stream 输入 profile，并复用本批的聚合与隐私契约。

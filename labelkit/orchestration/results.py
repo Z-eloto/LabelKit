@@ -18,13 +18,19 @@ EstimateAssumption = Literal[
     "stream_downstream_sessions_lower_bound",
     "segment_worst_case_budget_upper_bound",
 ]
-
+JsonValueKind = Literal["null", "boolean", "integer", "number", "string", "array", "object"]
+SensitivePattern = Literal["email_like", "phone_like", "cn_id_like", "credential_like"]
 __all__ = [
     "EstimateAssumption",
+    "JsonValueKind",
     "RunArtifacts",
     "RunEstimate",
     "RunResult",
     "RunSummary",
+    "SensitivePattern",
+    "TextFieldProfile",
+    "TextInputProfile",
+    "TextLengthProfile",
     "ValidationResult",
 ]
 
@@ -61,6 +67,49 @@ class RunEstimate:
             **self.calls,
             "total_calls": self.total_calls,
         }
+
+
+@dataclass(frozen=True)
+class TextFieldProfile:
+    """Shape-only statistics for one top-level JSON field in the sample."""
+
+    name: str
+    present: int
+    nulls: int
+    kinds: tuple[JsonValueKind, ...]
+
+
+@dataclass(frozen=True)
+class TextLengthProfile:
+    """Character-length distribution of extracted text in the sample."""
+
+    minimum: int
+    maximum: int
+    mean: float
+    p50: int
+    p95: int
+
+
+@dataclass(frozen=True)
+class TextInputProfile:
+    """Bounded, content-free profile of a text JSONL input."""
+
+    config_digest: str
+    project_digest: str
+    text_field: str
+    files: tuple[str, ...]
+    estimated_lines: int
+    sample_limit: int
+    sampled_lines: int
+    sampled_records: int
+    bad_lines: int
+    sample_complete: bool
+    fields: tuple[TextFieldProfile, ...]
+    fields_truncated: bool
+    text_lengths: TextLengthProfile
+    duplicate_texts: int
+    duplicate_rate: float
+    sensitive_record_counts: Mapping[SensitivePattern, int]
 
 
 @dataclass(frozen=True)  # Existing shape, moved from orchestrator.py in P1.1.

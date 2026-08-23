@@ -128,7 +128,9 @@ labelkit/
 │   ├── __init__.py
 │   ├── orchestrator.py                 # M10 batch/stage lifecycle and report aggregation
 │   ├── factory.py                      # operator construction and frozen pipeline order
+│   ├── input_profile.py                # bounded, content-free text input inspection
 │   ├── profile_usage.py                # validate --probe referenced-profile discovery
+│   ├── results.py                      # structured library result contracts (no I/O)
 │   └── runtime.py                      # runtime object-graph assembly and public run/validate entry
 └── data/rubrics/
     ├── default_text.toml
@@ -4085,6 +4087,51 @@ class RunEstimate:
     assumptions: tuple[EstimateAssumption, ...]    # closed machine-readable vocabulary
 
 
+JsonValueKind = Literal[
+    "null", "boolean", "integer", "number", "string", "array", "object",
+]
+SensitivePattern = Literal[
+    "email_like", "phone_like", "cn_id_like", "credential_like",
+]
+
+
+@dataclass(frozen=True)                            # [FROZEN HERE — Phase 1]
+class TextFieldProfile:
+    name: str                                      # top-level JSON key; never a field value
+    present: int
+    nulls: int
+    kinds: tuple[JsonValueKind, ...]               # frozen vocabulary order
+
+
+@dataclass(frozen=True)                            # [FROZEN HERE — Phase 1]
+class TextLengthProfile:
+    minimum: int
+    maximum: int
+    mean: float
+    p50: int                                       # nearest-rank character percentile
+    p95: int
+
+
+@dataclass(frozen=True)                            # [FROZEN HERE — Phase 1]
+class TextInputProfile:
+    config_digest: str
+    project_digest: str
+    text_field: str
+    files: tuple[str, ...]                         # relative input file names only
+    estimated_lines: int                           # complete non-empty-line scan
+    sample_limit: int                              # 1..10,000; default 1,000
+    sampled_lines: int                             # valid + bad lines visited in prefix
+    sampled_records: int                           # valid records aggregated
+    bad_lines: int                                 # within sampled prefix
+    sample_complete: bool
+    fields: tuple[TextFieldProfile, ...]           # at most 256 unique top-level keys
+    fields_truncated: bool
+    text_lengths: TextLengthProfile
+    duplicate_texts: int                           # repeats after NFC + whitespace collapse
+    duplicate_rate: float                         # duplicate_texts / sampled_records
+    sensitive_record_counts: Mapping[SensitivePattern, int]
+
+
 @dataclass(frozen=True)                            # [FROZEN HERE — 2026-08-14]
 class RunServices:
     """The orchestrator's shared runtime services and run identity, as ONE parameter object.
@@ -4125,6 +4172,21 @@ same aggregated `ConfigError`, and successful validation still prints `configura
 or output/trace/report channel and prints no console text. `assumptions` always declares that
 retries and repairs are excluded, then conditionally records the class/multi-label lower bound,
 stream downstream sessions lower bound, and worst-case segment budget upper bound.
+
+`profile_text_input(cfg, sample_limit=1000)` accepts an already validated process/text
+`ResolvedConfig`. It performs one complete `Ingestor.scan(estimate=True)` to freeze the relative
+file list and non-empty-line estimate, then consumes at most 1–10,000 valid records through the
+real `Ingestor.records()` path. Consequently text-field extraction, UTF-8/JSON handling and
+`input.on_bad_line` behavior remain identical to execution. `sampled_lines` and `bad_lines` cover
+only the visited prefix; `sample_complete` states whether that prefix reached every estimated
+non-empty line. Field profiling is top-level and capped at 256 names (the configured text root is
+prioritized); text percentiles use character counts and nearest rank; basic duplicates use the
+same NFC plus whitespace-collapse normalization as exact text dedup. Sensitive heuristics count
+records matching email-like, phone-like, Chinese-ID-like, or credential-like patterns in the
+extracted text only. The API never returns raw JSON, extracted text, record IDs, source line
+locations, matched values, or per-record hashes. It constructs no `LLMClient`, `Emitter`, trace,
+report, or output channel and prints no console text. UI modality and generate-only are rejected
+as API misuse; UI pairing and stream/session/time summaries belong to the separate P1.6 profile.
 
 `execute_project(config_path, project_path, overrides, listener=None)` owns the same runtime
 object graph and side effects as the historical run entry point, but returns `RunResult` instead
