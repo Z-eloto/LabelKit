@@ -100,3 +100,48 @@ deterministically without parsing messages.
 - call/result data serialize to JSON without provider-specific function-calling
   objects;
 - no executor, registry, policy, I/O, LLM, CLI, or persistence behavior exists.
+
+## 7. P2.2 Registry and Router
+
+`ToolRegistry` starts empty. Production code registers no real LabelKit tool in
+P2.2; tests inject local executors. Registration is atomic and rejects:
+
+- names outside `^[a-z][a-z0-9_]{0,63}$` or duplicate names;
+- R4 declarations and non-callable executors;
+- schemas whose root is not `type: object` with
+  `additionalProperties: false`;
+- any `$ref` until a bounded reference-resolution policy is specified;
+- schemas that fail Draft 2020-12 meta-validation.
+
+`specs()` returns a name-sorted immutable tuple. `get_spec()` exposes metadata
+only; executors remain package-private and are resolvable only by `ToolRouter`.
+Registration owns JSON copies of both schemas, and every public spec read returns
+new copies, so caller mutation cannot drift Planner metadata from compiled gates.
+
+Routing order is frozen:
+
+1. resolve the code-registered tool name;
+2. make a strict JSON round-trip copy of arguments;
+3. validate arguments against `arguments_schema`;
+4. call the executor exactly once with the isolated copy;
+5. make a strict JSON round-trip copy of its output;
+6. validate the output against `result_schema`;
+7. construct the sole boundary-owned `ToolResult` with echoed identity and
+   elapsed time.
+
+Strict JSON copying rejects NaN/infinity, non-string object keys, non-object
+roots, unsupported values, and cycles. It prevents an executor from mutating the
+original `ToolCall` and prevents later executor mutation from changing a returned
+result.
+
+Unknown tools and invalid arguments never reach an executor. Argument/result
+validation diagnostics contain only RFC 6901 paths and validator keyword names,
+never rejected instance values; at most 20 violations are returned with an
+explicit truncation flag. Executor exceptions become `execution_failed` with only
+the exception class name, never the exception message. Invalid outputs become
+`invalid_result` and are discarded. `KeyboardInterrupt`, `SystemExit`, and other
+`BaseException` control-flow signals are not swallowed.
+
+Router-generated errors are non-retryable in P2.2. Policy, approval, budget,
+idempotency enforcement, persistence, asynchronous execution, and real tool
+registration remain out of scope for this batch.

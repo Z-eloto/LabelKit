@@ -1134,3 +1134,21 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2206 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P2.1 达到“Schema 边界、结果互斥与错误闭集冻结”的验收条件；下一步执行 P2.2，建立只注册测试工具的 Registry/Router，确保未知工具、非法参数与非法结果永不跨越执行边界。
+
+### 2026-08-24：P2.2 测试工具 Registry/Router
+
+状态：**完成。**
+
+已完成：
+
+- 新增默认为空的内存 `ToolRegistry` 与确定性 `ToolRouter`；生产代码不注册任何真实 LabelKit 工具，所有执行器仅由离线测试依赖注入；
+- Registry 原子拒绝非 snake_case 名称、重名、R4、非 callable、非严格对象根 Schema、`$ref` 和 Draft 2020-12 元验证失败；`specs()` 按名称排序且只暴露 spec，执行器不进入 Planner 可见面；
+- Registry 在注册时拥有两份 Schema 的 JSON 副本，`specs()` / `get_spec()` 每次返回防御性副本，外部突变不能使 Planner 元数据与已编译校验器漂移；
+- Router 冻结七步边界：解析名称 → 参数严格 JSON 隔离拷贝 → 参数 Schema 校验 → 执行一次 → 结果隔离拷贝 → 结果 Schema 校验 → Router 组装 `ToolResult`；执行器无法伪造 status/call_id/tool/elapsed；
+- 未知工具和非法参数绝不触发 executor；NaN/Infinity、非字符串键、非 JSON 值、非对象根和循环引用均结构化收口，且 executor 无法反写原 `ToolCall`；
+- 校验错误只返回 RFC 6901 path 与 validator rule，不回传实例值，最多 20 条并显式标记截断；executor 异常只保留类名而不泄露 message，`KeyboardInterrupt` / `SystemExit` 等控制流异常不吞；
+- `docs/dev/SPEC-agent-control-plane.md` 与 `docs/CONTRACTS.md` 已同步注册规则、路由顺序、脱敏契约与依赖归属；Policy、审批、预算、幂等执行和真实工具注册明确留在后续批次；
+- Agent 契约/路由测试 47 passed，直接 Agent+冻结布局回归 118 passed；生产代码净增 219 行，处于 P2.2 的 100–220 行范围；
+- 完整离线套件通过：2236 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+
+判定：P2.2 达到“未知工具、非法参数永不到执行器，非法结果永不跨出 Router”的验收条件；下一步执行 P2.3，实现路径与敏感文件 Policy，并在 Router 执行前接入可测试的授权门。

@@ -84,7 +84,8 @@ labelkit/
 │   ├── __init__.py                     # provider-neutral control-plane exports
 │   └── tools/
 │       ├── __init__.py                 # tool-boundary exports
-│       └── contracts.py                # P2.1 ToolSpec/Call/Error/Result data contracts
+│       ├── contracts.py                # P2.1 ToolSpec/Call/Error/Result data contracts
+│       └── registry.py                 # P2.2 in-memory test-tool Registry/Router
 ├── cli/
 │   ├── __init__.py                     # public exports: main, build_parser, exit_code_for
 │   ├── main.py                         # process entry, exception rendering, sole exit-code mapping

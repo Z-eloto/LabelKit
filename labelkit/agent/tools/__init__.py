@@ -1,4 +1,4 @@
-"""Agent 工具契约；注册和路由在后续 P2 批次接入。"""
+"""Agent 工具契约、内存注册表与确定性路由器。"""
 
 from labelkit.agent.tools.contracts import (
     JsonObject,
@@ -11,8 +11,10 @@ from labelkit.agent.tools.contracts import (
     ToolRiskLevel,
     ToolSpec,
 )
+from labelkit.agent.tools.registry import ToolExecutor, ToolRegistry, ToolRouter
 
 __all__ = [
     "JsonObject", "JsonValue", "ToolCall", "ToolError", "ToolErrorKind",
-    "ToolResult", "ToolResultStatus", "ToolRiskLevel", "ToolSpec",
+    "ToolExecutor", "ToolRegistry", "ToolResult", "ToolResultStatus",
+    "ToolRiskLevel", "ToolRouter", "ToolSpec",
 ]
