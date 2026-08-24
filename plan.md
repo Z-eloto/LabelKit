@@ -1152,3 +1152,19 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2236 passed、3 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P2.2 达到“未知工具、非法参数永不到执行器，非法结果永不跨出 Router”的验收条件；下一步执行 P2.3，实现路径与敏感文件 Policy，并在 Router 执行前接入可测试的授权门。
+
+### 2026-08-24：P2.3 路径与敏感文件 Policy
+
+状态：**完成。**
+
+已完成：
+
+- 新增 `ToolPolicy`、`ToolPathRule` 与 `PathPolicy`：每个注册工具必须显式声明顶层只读/写入路径参数；无路径工具也必须配置空规则，缺失规则按 fail-closed 拒绝；
+- Router 在原始参数通过 Schema 后、executor 调用前按声明顺序执行 Policy；Policy 只接收防御性 `ToolSpec` 副本，不能修改 call/tool/idempotency 身份，规范化结果会再次经过严格 JSON 与 Schema 校验；Policy 拒绝、异常或非法输出均不会触发 executor；
+- 相对路径基于显式 `base_dir` 解析，获准路径在执行前替换为规范绝对路径；已存在目录 read grant 允许其子树，文件或未存在路径只允许精确目标，写入只允许单一 `allowed_write_root`（后续由 P2.5 固定为 `out/agent/<run_id>`）；
+- 显式拒绝 `..`、read/write scope 逃逸、符号链接与 Windows reparse point，以及 `.git`、`.ssh`、`.aws`、`.env*`、`mytips.md`、常见 credential/secret 文件名和私钥后缀；错误只返回规则标识，不回传被拒绝的路径；
+- `docs/dev/SPEC-agent-control-plane.md` 与 `docs/CONTRACTS.md` 已同步 Policy 链顺序、路径授权语义与残余边界：P2.3 不是 OS 沙箱，未来真实文件 executor 仍需保留规范路径并防止授权检查后的链接竞态；本批不注册真实工具、不通过 Agent executor 执行文件 I/O；
+- Agent 与冻结布局直接回归通过：143 passed、3 skipped；本机 3 个 skip 均因 Windows 环境无创建符号链接权限，测试会在 Ubuntu CI 实际执行；生产代码净增 250 行，位于 P2.3 的 100–250 行范围上限；
+- 完整离线套件通过：2261 passed、6 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+
+判定：P2.3 达到“路径逃逸、链接和敏感文件访问在执行前确定性拒绝，拒绝路径 executor 零调用”的验收条件；下一步执行 P2.4，实现预算与重复动作 Policy，冻结费用上限和幂等边界。

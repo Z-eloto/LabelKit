@@ -123,10 +123,12 @@ Routing order is frozen:
 1. resolve the code-registered tool name;
 2. make a strict JSON round-trip copy of arguments;
 3. validate arguments against `arguments_schema`;
-4. call the executor exactly once with the isolated copy;
-5. make a strict JSON round-trip copy of its output;
-6. validate the output against `result_schema`;
-7. construct the sole boundary-owned `ToolResult` with echoed identity and
+4. apply configured policies in declaration order and validate their normalized
+   arguments again;
+5. call the executor exactly once with the isolated, policy-approved copy;
+6. make a strict JSON round-trip copy of its output;
+7. validate the output against `result_schema`;
+8. construct the sole boundary-owned `ToolResult` with echoed identity and
    elapsed time.
 
 Strict JSON copying rejects NaN/infinity, non-string object keys, non-object
@@ -142,6 +144,48 @@ the exception class name, never the exception message. Invalid outputs become
 `invalid_result` and are discarded. `KeyboardInterrupt`, `SystemExit`, and other
 `BaseException` control-flow signals are not swallowed.
 
-Router-generated errors are non-retryable in P2.2. Policy, approval, budget,
-idempotency enforcement, persistence, asynchronous execution, and real tool
-registration remain out of scope for this batch.
+Router-generated errors are non-retryable in P2.2. P2.3 adds the path policy
+below; approval, budget, idempotency enforcement, persistence, asynchronous
+execution, and real tool registration remain out of scope.
+
+## 8. P2.3 Path Policy
+
+`ToolRouter` accepts an ordered tuple of `ToolPolicy` objects. A policy receives a
+defensive `ToolSpec` copy and a JSON-isolated `ToolCall`, then returns either a
+normalized `ToolCall` or a structured `ToolError`. Policies run only after the
+original arguments pass their schema and immediately before the executor. The
+Router rejects policy exceptions, non-JSON/schema-invalid normalized arguments,
+and any attempt to change the call, tool, or idempotency identities. A denial or
+broken policy never reaches the executor.
+
+`PathPolicy` is configured per run with:
+
+- a base directory used to resolve relative arguments;
+- explicitly allowed read paths;
+- an optional single write root, intended to be `out/agent/<run_id>` once the
+  workspace lifecycle exists;
+- one `ToolPathRule` for every registered tool, including an explicit empty rule
+  for pathless tools.
+
+Rules declare top-level scalar string arguments as reads or writes. A missing
+tool rule denies the entire call. An existing directory read grant authorizes its
+subtree; a file or non-existing read grant authorizes only that exact path. A
+write is authorized only at or below the write root. Authorized arguments are
+replaced with canonical absolute paths before execution.
+
+The following conditions produce `policy_denied` without returning the rejected
+path value:
+
+- any explicit `..` component, even if lexical normalization would remain inside
+  a grant;
+- any path outside its read or write grant;
+- any existing symbolic-link or Windows reparse-point component;
+- `.git`, `.ssh`, `.aws`, `.env*`, `mytips.md`, common credential/secret names,
+  private-key names, and `.pem|.key|.p12|.pfx` paths.
+
+Policy configuration itself rejects parent traversal, linked roots, and sensitive
+grants. The implementation performs metadata checks immediately before dispatch,
+but it is not an operating-system sandbox: future real file executors must retain
+the canonical path, avoid link-following races, and confine writes to the
+P2.5-owned workspace. P2.3 registers no real LabelKit tool and performs no file
+write through an Agent executor.

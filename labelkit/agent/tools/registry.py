@@ -11,6 +11,7 @@ from typing import Callable, Mapping, Protocol
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError, ValidationError
 
+from labelkit.agent.policies import ToolPolicy
 from labelkit.agent.tools.contracts import (
     JsonObject,
     JsonValue,
@@ -84,8 +85,10 @@ class ToolRouter:
     """在执行前后完成 Schema 门禁，并统一翻译错误。"""
 
     def __init__(self, registry: ToolRegistry, *,
+                 policies: tuple[ToolPolicy, ...] = (),
                  clock: Callable[[], float] = time.perf_counter) -> None:
         self._registry = registry
+        self._policies = tuple(policies)
         self._clock = clock
 
     def route(self, call: ToolCall) -> ToolResult:
@@ -104,6 +107,37 @@ class ToolRouter:
             return self._error(
                 call, started, "invalid_arguments", "tool arguments failed schema validation",
                 details=details)
+
+        active_call = ToolCall(
+            call.call_id, call.tool, arguments, call.idempotency_key)
+        for policy in self._policies:
+            try:
+                outcome = policy.evaluate(_copy_spec(item.spec), active_call)
+            except Exception as exc:
+                return self._error(
+                    call, started, "internal_error", "tool policy failed",
+                    details={"exception_type": type(exc).__name__})
+            if isinstance(outcome, ToolError):
+                return self._policy_error(call, started, outcome)
+            if not isinstance(outcome, ToolCall) or (
+                    outcome.call_id != call.call_id
+                    or outcome.tool != call.tool
+                    or outcome.idempotency_key != call.idempotency_key):
+                return self._error(
+                    call, started, "internal_error",
+                    "tool policy returned an invalid call")
+            active_call = outcome
+
+        try:
+            arguments = _json_object_copy(active_call.arguments)
+        except Exception:
+            return self._error(
+                call, started, "internal_error",
+                "tool policy returned invalid arguments")
+        if _validation_details(item.arguments_validator, arguments) is not None:
+            return self._error(
+                call, started, "internal_error",
+                "tool policy violated the argument schema")
         try:
             raw_output = item.executor(arguments)
         except Exception as exc:
@@ -122,6 +156,19 @@ class ToolRouter:
                 details=details)
         return ToolResult(
             call.call_id, call.tool, "success", output, None, self._elapsed(started))
+
+    def _policy_error(
+            self, call: ToolCall, started: float, error: ToolError) -> ToolResult:
+        """Copy policy errors across the JSON boundary before returning them."""
+        try:
+            details = _json_object_copy(error.details)
+        except Exception:
+            return self._error(
+                call, started, "internal_error", "tool policy returned an invalid error")
+        return ToolResult(
+            call.call_id, call.tool, "error", None,
+            ToolError(error.kind, error.message, error.retryable, details),
+            self._elapsed(started))
 
     def _error(self, call: ToolCall, started: float, kind: ToolErrorKind,
                message: str, *, details: JsonObject | None = None) -> ToolResult:
