@@ -295,3 +295,39 @@ output file. Their serialization and recovery belong to later batches. Like the
 path policy, this API is not an OS sandbox against a privileged process changing
 directories after validation; real tools must continue to use the owned canonical
 paths and the execution-time `PathPolicy`.
+
+## 11. P2.6 Read-only Dataset Inspection Tool
+
+`inspect_dataset` is the first real LabelKit Agent tool. It remains absent from a
+new `ToolRegistry` until `register_inspect_dataset(registry, base_config)` is
+called explicitly. Registration binds one caller-supplied, already validated,
+process-mode `ResolvedConfig`; project/config loading and candidate validation
+remain P2.7/P2.8 responsibilities.
+
+The R0 argument object has exactly three required fields: `input_path`, `modality`
+(`text|ui`), and `sample_limit` (integer `1..10000`). The code-owned path rule
+declares `input_path` read-only and the budget rule declares zero monetary cost
+and no pilot. A production Controller must install both rules in a `PathPolicy →
+BudgetPolicy` chain. Thus the executor receives a canonical, authorized path and
+an invalid or denied call cannot reach profiling or consume a budget claim.
+
+At execution, the requested modality must equal the bound config modality. The
+executor creates immutable config replacements for only the authorized input and
+modality, clears CLI `limit` and `dry_run`, and calls the public P1
+`profile_input(cfg, sample_limit=...)` entry exactly once. It does not copy ingest,
+pairing, stream-session, duplicate, time-range, or sensitive-signal logic.
+
+Success has exactly `profile_type` (`text|ui|stream`) and `profile`. The profile
+is the JSON form of the corresponding exact frozen P1 dataclass. The result
+Schema derives and closes the allowed top-level profile field names from those
+contracts, preventing an alternate profile implementation from adding an
+undeclared output channel. P1 owns the nested aggregate shapes and vocabulary.
+
+The tool returns filenames, counts, distributions, field names, pairing/session
+summaries, time coverage, duplicate rate, and sensitive-pattern hit counts only.
+It returns no record text, original JSON, UI tree text, matched sensitive value,
+record/session identity, per-record location, or hash. It constructs no LLM,
+Emitter, trace, report, or formal output. Router result validation remains the
+last boundary; profiler exceptions expose only their exception type, unsupported
+profile types fail execution, and non-finite/non-JSON results are discarded as
+`invalid_result`.

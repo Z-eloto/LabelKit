@@ -84,6 +84,7 @@ EXPECTED_PRODUCTION_PY = {
     "labelkit/agent/workspace.py",
     "labelkit/agent/tools/__init__.py",
     "labelkit/agent/tools/contracts.py",
+    "labelkit/agent/tools/inspect.py",
     "labelkit/agent/tools/registry.py",
     "labelkit/cli/__init__.py",
     "labelkit/cli/commands.py",
@@ -135,6 +136,7 @@ EXPECTED_PRODUCTION_PY = {
 
 EXPECTED_TEST_PY = {
     "tests/agent/test_budget_policy.py",
+    "tests/agent/test_inspect_tool.py",
     "tests/agent/test_path_policy.py",
     "tests/agent/test_workspace.py",
     "tests/agent/test_tool_contracts.py",

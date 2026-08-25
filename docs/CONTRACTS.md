@@ -241,9 +241,27 @@ public runtime entry points and owns only parsing, user interaction, and the sol
 code mapping. Common depends on neither operators nor orchestration; operators never depend on
 orchestration; CLI never imports operators. `labelkit.agent` is a separate optional control
 plane above public orchestration/common surfaces, not a fifth stage/data-plane layer; the data
-plane never imports it. P2.1–P2.5 add control contracts, routing, policy, and an isolated
-workspace only; they do not alter
+plane never imports it. P2.1–P2.6 add control contracts, routing, policy, an isolated
+workspace, and one explicitly registered read-only inspection tool; they do not alter
 the pipeline graph below.
+
+### 2.1 Agent `inspect_dataset` boundary (P2.6)
+
+`inspect_dataset` is an R0 tool registered explicitly against an already validated
+process-mode `ResolvedConfig`; registries remain empty by default. Its strict input is
+`{input_path, modality: text|ui, sample_limit: 1..10000}`. The code-owned policy declarations
+mark the path read-only and the monetary cost zero/non-pilot. Callers must install PathPolicy
+before the terminal BudgetPolicy.
+
+After policy canonicalization, the executor immutably replaces only run input/modality, clears
+CLI limit/dry-run, and invokes the public P1 `profile_input` once. Its strict output envelope is
+`{profile_type: text|ui|stream, profile}`; the profile field names are exactly those of the
+matching frozen P1 profile dataclass. P1 remains the sole owner of input scanning, UI pairing,
+stream sessions, time summaries, duplicate detection, and sensitive-pattern aggregation.
+Results contain aggregate, content-free statistics only—never record/UI text, original JSON,
+matched sensitive values, per-record locations, identities, or hashes—and create no LLM,
+Emitter, output, report, or trace. Full registration and privacy/error details are normative in
+`docs/dev/SPEC-agent-control-plane.md` §11.
 
 Pipeline order per batch — the three chain forms (process superset / generation re-flow /
 `generate_only`):

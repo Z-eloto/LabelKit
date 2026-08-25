@@ -1203,3 +1203,20 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2330 passed、8 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P2.5 达到“Agent 只写独立 run/candidate 目录，并发与失败路径不会发布半初始化或覆盖已有 workspace”的验收条件；下一步执行 P2.6，实现复用 P1 profile 的 `inspect_dataset` 只读工具。
+
+### 2026-08-25：P2.6 `inspect_dataset` 只读工具
+
+状态：**完成。**
+
+已完成：
+
+- 新增首个真实 LabelKit Agent 工具 `inspect_dataset`，但 `ToolRegistry` 仍默认空；只有调用 `register_inspect_dataset(registry, base_config)` 才会显式注册，并绑定一个已验证的 process-mode `ResolvedConfig`，配置加载与候选验证仍留给 P2.7/P2.8；
+- 冻结 R0 工具参数为 `input_path`、`modality(text|ui)`、`sample_limit(1..10000)` 三个必填字段且禁止额外字段；代码拥有的 `INSPECT_DATASET_PATH_RULE` 把输入声明为只读路径，`INSPECT_DATASET_BUDGET_RULE` 声明零费用、非 pilot；
+- executor 只在请求模态与已验证配置一致时，以冻结 dataclass replacement 替换规范输入路径与模态，清除 CLI `limit`/`dry_run`，随后恰调用一次 P1 `profile_input`；没有复制 ingest、UI 配对、stream 会话、时间范围、重复率或敏感信号逻辑；
+- 成功结果严格包裹为 `profile_type + profile`；支持 text/UI/stream 三个精确 P1 冻结 dataclass，结果 Schema 从对应 dataclass 推导并关闭顶层画像字段集合，子类扩展、未知画像类型与非 JSON/NaN 结果不能越过 Router；
+- 结果只含文件名、计数、字段/长度分布、UI 配对、stream 会话与时间覆盖、重复率和敏感模式命中计数，不含正文、原始 JSON、树文本、命中敏感值、record/session ID、逐记录位置或哈希；工具不构造 LLMClient、Emitter、trace、report 或正式输出；
+- 路径拒绝在 profiler 和终端 BudgetPolicy 前发生，越界时 profiler 零调用且不占 tool-call 预算；非法参数永不到 profiler，模态不一致、画像异常和不支持类型只返回脱敏的结构化错误；
+- `docs/dev/SPEC-agent-control-plane.md` 与 `docs/CONTRACTS.md` 已同步显式注册、策略链、P1 单一事实源、输出闭集与隐私边界；新增生产代码净增 144 行，处于 P2.6 的 80–180 行范围内；直接 inspect/Agent/profile/CLI 回归通过：244 passed、5 skipped；
+- 完整离线套件通过：2344 passed、8 skipped、49 deselected；secret scan、生产模块 `compileall`、冻结包布局/依赖方向与 `git diff --check` 均通过。
+
+判定：P2.6 达到“真实 R0 工具只在策略门后读取授权输入，直接复用 P1 profile 且不复制逻辑、不写产物、不泄露数据内容”的验收条件；下一步执行 P2.7，实现只返回去敏配置摘要的 `inspect_project` 工具。
