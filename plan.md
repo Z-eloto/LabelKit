@@ -1220,3 +1220,21 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2344 passed、8 skipped、49 deselected；secret scan、生产模块 `compileall`、冻结包布局/依赖方向与 `git diff --check` 均通过。
 
 判定：P2.6 达到“真实 R0 工具只在策略门后读取授权输入，直接复用 P1 profile 且不复制逻辑、不写产物、不泄露数据内容”的验收条件；下一步执行 P2.7，实现只返回去敏配置摘要的 `inspect_project` 工具。
+
+### 2026-08-25：P2.7 `inspect_project` 去敏配置检查工具
+
+状态：**完成。**
+
+已完成：
+
+- 新增显式注册的 R0 `inspect_project` 工具；注册时绑定 Agent 启动前已完整验证的 `ResolvedConfig`，快照化生成去敏摘要和 config/project 规范路径身份，`ToolRegistry` 默认仍为空；
+- 安全设计明确拒绝在 R0 executor 内重新加载 Planner 指定的 TOML：M1 配置验证可能导入并执行用户 Python validator，若工具内重载会把“只读检查”变成永久禁止的 R4 代码执行入口；候选配置验证继续由 P2.8 在候选生命周期和补丁白名单下负责；
+- 参数严格限定为 `config_path` 与 `project_path` 两个必填只读路径；两者先通过 `PathPolicy` 规范化与授权，再必须同时匹配注册时绑定的项目快照；代码拥有的 Budget 规则为零费用、非 pilot，路径拒绝发生在预算占用前；
+- 返回配置/项目 digest、mode/modality、启用算子、实际引用的 LLM/embedding profile、Schema 形态计数、关键阈值、生成配额、stream/时间规则聚合和闭合风险标志；profile 列表各最多 64 项、名称最多 128 字符，并显式返回截断位；
+- 风险闭集固定为 custom code hooks、内容型 trace、full rejects、passthrough fields、LLM 未知价格五类，只返回“是否存在”而不返回 callback、字段或配置值；四个嵌套摘要对象均关闭额外字段；
+- 输出不含 config/project/output/trace 路径、API key、密钥环境变量名、endpoint、model、prompt/instruction/example、Schema 内容或字段名、class/rubric 名、callback 引用；profile 名是后续规划所需的唯一用户命名引用，作为有界不可信数据返回；
+- 摘要在注册时完成，调用方随后修改 `user_schema` 或 profile 映射不能改变已注册结果；工具不构造 loader、callback、LLMClient、Emitter、trace、report 或正式输出，路径不匹配与参数错误只返回脱敏结构化错误；
+- `docs/dev/SPEC-agent-control-plane.md` 与 `docs/CONTRACTS.md` 已同步 R0/R4 分界、快照语义、字段闭集、长度上限和隐私边界；新增生产代码净增 180 行，恰在 P2.7 的 80–180 行范围上限；直接 inspect_project/Agent/CLI 回归通过：235 passed、5 skipped；
+- 完整离线套件通过：2353 passed、8 skipped、49 deselected；secret scan、生产模块 `compileall`、冻结包布局/依赖方向与 `git diff --check` 均通过。
+
+判定：P2.7 达到“只检查已验证配置快照，不让 Planner 通过 R0 路径触发配置代码执行，并且配置摘要有界、去敏、不可被注册后突变”的验收条件；下一步执行 P2.8，实现无效候选不能进入后续工具的 `validate_candidate`。

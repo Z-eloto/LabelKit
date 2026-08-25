@@ -136,6 +136,7 @@ EXPECTED_PRODUCTION_PY = {
 
 EXPECTED_TEST_PY = {
     "tests/agent/test_budget_policy.py",
+    "tests/agent/test_inspect_project_tool.py",
     "tests/agent/test_inspect_tool.py",
     "tests/agent/test_path_policy.py",
     "tests/agent/test_workspace.py",

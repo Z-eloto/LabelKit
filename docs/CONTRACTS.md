@@ -241,8 +241,8 @@ public runtime entry points and owns only parsing, user interaction, and the sol
 code mapping. Common depends on neither operators nor orchestration; operators never depend on
 orchestration; CLI never imports operators. `labelkit.agent` is a separate optional control
 plane above public orchestration/common surfaces, not a fifth stage/data-plane layer; the data
-plane never imports it. P2.1–P2.6 add control contracts, routing, policy, an isolated
-workspace, and one explicitly registered read-only inspection tool; they do not alter
+plane never imports it. P2.1–P2.7 add control contracts, routing, policy, an isolated
+workspace, and explicitly registered read-only inspection tools; they do not alter
 the pipeline graph below.
 
 ### 2.1 Agent `inspect_dataset` boundary (P2.6)
@@ -262,6 +262,22 @@ Results contain aggregate, content-free statistics only—never record/UI text, 
 matched sensitive values, per-record locations, identities, or hashes—and create no LLM,
 Emitter, output, report, or trace. Full registration and privacy/error details are normative in
 `docs/dev/SPEC-agent-control-plane.md` §11.
+
+### 2.2 Agent `inspect_project` boundary (P2.7)
+
+`inspect_project` binds one startup-validated `ResolvedConfig` and snapshots a bounded,
+deidentified summary at explicit registration. Its strict input is `{config_path,
+project_path}`; both paths must pass `PathPolicy` and match the bound canonical identities.
+The executor never reloads TOML because configuration validators are trusted Python code and
+Planner-selected loading would turn R0 inspection into forbidden R4 code execution.
+
+The strict result exposes only digests, mode/modality, enabled operators, bounded referenced
+profile names with truncation state, schema shape counts, selected thresholds, aggregate
+generation/time-rule counts, and five closed static risk flags. It excludes paths, credentials,
+environment-variable names, endpoints/models, prompts/examples/instructions, schema content or
+field names, class/rubric names, callback references, and output/trace locations. Full snapshot,
+field, bound, policy, and privacy rules are normative in
+`docs/dev/SPEC-agent-control-plane.md` §12.
 
 Pipeline order per batch — the three chain forms (process superset / generation re-flow /
 `generate_only`):

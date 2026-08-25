@@ -301,8 +301,8 @@ paths and the execution-time `PathPolicy`.
 `inspect_dataset` is the first real LabelKit Agent tool. It remains absent from a
 new `ToolRegistry` until `register_inspect_dataset(registry, base_config)` is
 called explicitly. Registration binds one caller-supplied, already validated,
-process-mode `ResolvedConfig`; project/config loading and candidate validation
-remain P2.7/P2.8 responsibilities.
+process-mode `ResolvedConfig`; loading occurs before R0 registration and candidate
+validation remains a separate P2.8 responsibility.
 
 The R0 argument object has exactly three required fields: `input_path`, `modality`
 (`text|ui`), and `sample_limit` (integer `1..10000`). The code-owned path rule
@@ -331,3 +331,37 @@ Emitter, trace, report, or formal output. Router result validation remains the
 last boundary; profiler exceptions expose only their exception type, unsupported
 profile types fail execution, and non-finite/non-JSON results are discarded as
 `invalid_result`.
+
+## 12. P2.7 Deidentified Project Inspection Tool
+
+`inspect_project` is an explicitly registered R0 view over one already validated
+`ResolvedConfig`. Registration snapshots the deidentified summary and canonical
+config/project identities. Its strict arguments are exactly `config_path` and
+`project_path`; both are code-declared read paths. After `PathPolicy` authorization,
+both canonical paths must equal the bound snapshot or execution fails without
+returning either path. The zero-cost, non-pilot budget rule remains terminal.
+
+The tool deliberately does not reload TOML. M1 validation may import and execute
+configured Python validators, so loading a Planner-selected file inside an R0
+executor would violate the permanent R4 code-execution boundary. A trusted startup
+path loads and validates the source configuration before Agent registration. P2.8
+will own candidate validation under the candidate lifecycle and patch whitelist.
+
+The result root is strict and returns only:
+
+- config/project digests, mode, modality, and enabled operator names;
+- bounded referenced profile names (at most 64 names of at most 128 characters per
+  LLM/embedding list) plus an explicit truncation bit;
+- schema shape counts/booleans, selected numeric thresholds, aggregate generation
+  quotas, and aggregate stream/time-rule counts;
+- the closed risk flags `custom_code_hooks`, `content_capturing_trace`,
+  `full_rejects`, `passthrough_fields`, and `unknown_llm_pricing`.
+
+The four nested summary objects also reject undeclared fields. Output never contains
+paths, API keys, API-key environment names, endpoints, models, prompt/instruction or
+example text, schema property names/content, class/rubric names, validator references,
+trace locations, or output locations. Profile names are the sole user-named references
+because subsequent planning must identify enabled profiles; they remain untrusted data
+and are bounded before entering Planner context. The snapshot is computed at registration,
+so later mutation of caller-owned mappings cannot alter a registered tool result. The tool
+constructs no loader, callback, LLM client, Emitter, trace, report, or output channel.
