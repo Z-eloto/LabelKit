@@ -123,8 +123,8 @@ Routing order is frozen:
 1. resolve the code-registered tool name;
 2. make a strict JSON round-trip copy of arguments;
 3. validate arguments against `arguments_schema`;
-4. apply configured policies in declaration order and validate their normalized
-   arguments again;
+4. apply configured policies in declaration order, JSON-isolate and validate each
+   normalized call before passing it to the next policy;
 5. call the executor exactly once with the isolated, policy-approved copy;
 6. make a strict JSON round-trip copy of its output;
 7. validate the output against `result_schema`;
@@ -144,9 +144,9 @@ the exception class name, never the exception message. Invalid outputs become
 `invalid_result` and are discarded. `KeyboardInterrupt`, `SystemExit`, and other
 `BaseException` control-flow signals are not swallowed.
 
-Router-generated errors are non-retryable in P2.2. P2.3 adds the path policy
-below; approval, budget, idempotency enforcement, persistence, asynchronous
-execution, and real tool registration remain out of scope.
+Router-generated errors are non-retryable in P2.2. P2.3–P2.4 add the policies
+below; approval decisions, persistence, asynchronous execution, and real tool
+registration remain out of scope.
 
 ## 8. P2.3 Path Policy
 
@@ -189,3 +189,56 @@ but it is not an operating-system sandbox: future real file executors must retai
 the canonical path, avoid link-following races, and confine writes to the
 P2.5-owned workspace. P2.3 registers no real LabelKit tool and performs no file
 write through an Agent executor.
+
+## 9. P2.4 Budget and Duplicate-Action Policy
+
+`BudgetPolicy` is a stateful terminal policy. `ToolRouter` rejects a policy chain
+that places a terminal policy before another policy. Consequently path and future
+stateless authorization gates complete first, and only then may the final policy
+atomically claim scarce resources. Every successful policy transformation is
+JSON-isolated and schema-validated before the next policy sees it.
+
+`BudgetLimits` defines exact per-run limits for USD cost, tool calls, pilot runs,
+one-based current iteration, and monotonic elapsed time. It also defines a cost
+soft-threshold ratio in `(0, 1]`. `ToolBudgetRule` is code-owned metadata for one
+tool and declares either a fixed `Decimal` or code-owned dynamic cost estimator,
+plus whether the call is a pilot. Planner arguments never self-declare trusted
+cost. Every tool needs an explicit rule. An unknown estimate is represented by
+`None` and returns `approval_required`; it is never silently treated as zero.
+All money arithmetic uses finite non-negative `Decimal` values.
+
+For a schema-valid call, checks occur deterministically in this order:
+
+1. declared tool rule;
+2. previously claimed idempotency-key digest;
+3. previously claimed normalized action digest (`tool + arguments`);
+4. iteration and monotonic wall-clock limits;
+5. tool-call and pilot-run limits;
+6. known cost;
+7. current hard/soft cost state and proposed reservation.
+
+Only a call that passes every check is claimed. Cost, counters, idempotency digest,
+and action digest are updated together under one lock immediately before executor
+dispatch. This prevents concurrent overspend and concurrent duplicate execution.
+Raw idempotency keys and arguments are not retained by the duplicate detector.
+
+Reaching a soft threshold does not cancel the call that crosses it, but blocks the
+next dispatch. An estimate above the hard remainder is denied. A zero-cost tool
+may run when `max_cost_usd` is zero, subject to the other limits. Exact cost can be
+reported once with `settle(idempotency_key, actual_cost_usd)`, replacing the
+reservation; zero releases the monetary reservation, while an actual overrun
+causes later calls to fail closed. `BudgetSnapshot` exposes exact aggregate totals
+and counters without identities or arguments.
+
+Claims survive executor exceptions and invalid results. This is conservative by
+design: an uncertain paid action must not be automatically replayed. A caller may
+settle it to zero only after deterministically proving that no paid request was
+made; the action remains a duplicate. Tools whose result can change must include
+immutable input/candidate/manifest versions in their arguments and idempotency
+derivation, so a genuinely new state has a new semantic action.
+
+P2.4 keeps the ledger in memory and registers no real paid tool. Persistent claim
+restoration belongs to P5, Controller iteration ownership belongs to P3, and
+actual provider usage extraction plus dual pilot limits belong to P4. Approval of
+unknown costs is not implemented by returning `approval_required`; it remains a
+separate future state transition.

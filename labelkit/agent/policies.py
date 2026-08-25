@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import stat
+import threading
+import time
 from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Mapping, Protocol
+from typing import Callable, Mapping, Protocol
 
 from labelkit.agent.tools.contracts import ToolCall, ToolError, ToolSpec
 
 class ToolPolicy(Protocol):
     """A policy may normalize a call or deny it with a structured error."""
+
+    terminal: bool
 
     def evaluate(self, spec: ToolSpec, call: ToolCall) -> ToolCall | ToolError: ...
 
@@ -37,6 +45,8 @@ class PathPolicy:
     Directory read grants cover their subtree; other grants cover one exact path.
     Every registered tool needs an explicit rule, including pathless tools.
     """
+
+    terminal = False
 
     def __init__(
         self,
@@ -126,6 +136,177 @@ class PathPolicy:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class BudgetLimits:
+    """Hard per-run limits plus the cost threshold that stops new dispatch."""
+
+    max_cost_usd: Decimal
+    max_tool_calls: int
+    max_pilot_runs: int
+    max_iterations: int
+    max_elapsed_s: float
+    soft_cost_ratio: Decimal = Decimal("0.9")
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "max_cost_usd", _money(self.max_cost_usd, "max_cost_usd"))
+        object.__setattr__(
+            self, "soft_cost_ratio", _money(self.soft_cost_ratio, "soft_cost_ratio"))
+        for name in ("max_tool_calls", "max_pilot_runs", "max_iterations"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if (isinstance(self.max_elapsed_s, bool)
+                or not isinstance(self.max_elapsed_s, (int, float))
+                or not math.isfinite(self.max_elapsed_s) or self.max_elapsed_s < 0):
+            raise ValueError("max_elapsed_s must be finite and non-negative")
+        if not Decimal("0") < self.soft_cost_ratio <= Decimal("1"):
+            raise ValueError("soft_cost_ratio must be in (0, 1]")
+
+
+@dataclass(frozen=True, slots=True)
+class ToolBudgetRule:
+    """Declare a conservative per-call cost reservation and pilot identity."""
+
+    cost_estimate: Decimal | Callable[[ToolCall], Decimal | None] | None = Decimal("0")
+    pilot: bool = False
+
+    def __post_init__(self) -> None:
+        if self.cost_estimate is not None and not callable(self.cost_estimate):
+            object.__setattr__(
+                self, "cost_estimate", _money(self.cost_estimate, "cost_estimate"))
+        if not isinstance(self.pilot, bool):
+            raise ValueError("pilot must be a boolean")
+
+    def estimate(self, call: ToolCall) -> Decimal | None:
+        value = self.cost_estimate(call) if callable(self.cost_estimate) else self.cost_estimate
+        return None if value is None else _money(value, "cost_estimate")
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetSnapshot:
+    """Content-safe, exact view of the in-memory run budget ledger."""
+
+    committed_cost_usd: Decimal
+    remaining_cost_usd: Decimal
+    tool_calls: int
+    pilot_runs: int
+    settled_calls: int
+    elapsed_s: float
+
+
+class BudgetPolicy:
+    """Atomically claim budget and semantic identities immediately before execution."""
+
+    terminal = True
+
+    def __init__(
+        self,
+        limits: BudgetLimits,
+        *,
+        rules: Mapping[str, ToolBudgetRule],
+        iteration: Callable[[], int] = lambda: 1,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if not isinstance(limits, BudgetLimits):
+            raise TypeError("limits must be a BudgetLimits instance")
+        if not callable(iteration) or not callable(clock):
+            raise TypeError("iteration and clock must be callable")
+        self._limits = limits
+        self._rules = dict(rules)
+        if any(not isinstance(name, str) or not name for name in self._rules):
+            raise ValueError("budget policy tool names must be non-empty strings")
+        if any(not isinstance(rule, ToolBudgetRule) for rule in self._rules.values()):
+            raise TypeError("budget policy rules must be ToolBudgetRule instances")
+        self._iteration = iteration
+        self._clock = clock
+        self._started = _policy_time(clock)
+        self._lock = threading.Lock()
+        self._cost = Decimal("0")
+        self._tool_calls = 0
+        self._pilot_runs = 0
+        self._idempotency_digests: set[str] = set()
+        self._action_digests: set[str] = set()
+        self._reservations: dict[str, tuple[Decimal, Decimal | None]] = {}
+
+    def evaluate(self, spec: ToolSpec, call: ToolCall) -> ToolCall | ToolError:
+        rule = self._rules.get(spec.name)
+        if rule is None:
+            return _policy_error("policy_denied", "undeclared_tool")
+        estimate = rule.estimate(call)
+        key_digest = _digest(call.idempotency_key)
+        action_digest = _action_digest(call)
+
+        with self._lock:
+            if key_digest in self._idempotency_digests:
+                return _policy_error("duplicate_call", "idempotency_key")
+            if action_digest in self._action_digests:
+                return _policy_error("duplicate_call", "repeated_action")
+
+            current_iteration = self._iteration()
+            if (isinstance(current_iteration, bool) or not isinstance(current_iteration, int)
+                    or current_iteration < 1):
+                raise RuntimeError("iteration supplier returned an invalid value")
+            if current_iteration > self._limits.max_iterations:
+                return _policy_error("budget_exceeded", "iterations")
+            elapsed = _policy_time(self._clock) - self._started
+            if elapsed < 0:
+                raise RuntimeError("budget clock moved backwards")
+            if elapsed >= self._limits.max_elapsed_s:
+                return _policy_error("budget_exceeded", "elapsed_time")
+            if self._tool_calls >= self._limits.max_tool_calls:
+                return _policy_error("budget_exceeded", "tool_calls")
+            if rule.pilot and self._pilot_runs >= self._limits.max_pilot_runs:
+                return _policy_error("budget_exceeded", "pilot_runs")
+            if estimate is None:
+                return _policy_error("approval_required", "cost_unknown")
+
+            maximum = self._limits.max_cost_usd
+            if maximum > 0 and self._cost >= maximum:
+                return _policy_error("budget_exceeded", "cost_hard_limit")
+            if maximum > 0 and self._cost >= maximum * self._limits.soft_cost_ratio:
+                return _policy_error("budget_exceeded", "cost_soft_limit")
+            if self._cost + estimate > maximum:
+                return _policy_error("budget_exceeded", "estimated_cost")
+
+            self._cost += estimate
+            self._tool_calls += 1
+            self._pilot_runs += int(rule.pilot)
+            self._idempotency_digests.add(key_digest)
+            self._action_digests.add(action_digest)
+            self._reservations[key_digest] = (estimate, None)
+        return call
+
+    def settle(self, idempotency_key: str, actual_cost_usd: Decimal) -> BudgetSnapshot:
+        """Replace one conservative reservation with its exact non-negative cost."""
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("idempotency_key must be a non-empty string")
+        actual = _money(actual_cost_usd, "actual_cost_usd")
+        key_digest = _digest(idempotency_key)
+        with self._lock:
+            reservation = self._reservations.get(key_digest)
+            if reservation is None:
+                raise ValueError("cannot settle an unknown idempotency key")
+            estimated, previous = reservation
+            if previous is not None:
+                raise ValueError("idempotency key is already settled")
+            self._cost += actual - estimated
+            self._reservations[key_digest] = (estimated, actual)
+            return self._snapshot_locked()
+
+    def snapshot(self) -> BudgetSnapshot:
+        with self._lock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self) -> BudgetSnapshot:
+        remaining = max(Decimal("0"), self._limits.max_cost_usd - self._cost)
+        settled = sum(actual is not None for _, actual in self._reservations.values())
+        elapsed = _policy_time(self._clock) - self._started
+        if elapsed < 0:
+            raise RuntimeError("budget clock moved backwards")
+        return BudgetSnapshot(
+            self._cost, remaining, self._tool_calls, self._pilot_runs, settled, elapsed)
+
+
 def _argument_names(values: tuple[str, ...], field: str) -> tuple[str, ...]:
     result = tuple(values)
     if any(not isinstance(value, str) or not value for value in result):
@@ -198,4 +379,47 @@ def _denied(rule: str) -> ToolError:
     )
 
 
-__all__ = ["PathPolicy", "ToolPathRule", "ToolPolicy"]
+def _money(value: object, field: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be a finite non-negative decimal")
+    try:
+        result = Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field} must be a finite non-negative decimal") from exc
+    if not result.is_finite() or result < 0:
+        raise ValueError(f"{field} must be a finite non-negative decimal")
+    return result
+
+
+def _policy_time(clock: Callable[[], float]) -> float:
+    value = clock()
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("policy clock must return a finite number")
+    return float(value)
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _action_digest(call: ToolCall) -> str:
+    payload = json.dumps(
+        {"tool": call.tool, "arguments": call.arguments},
+        ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+    return _digest(payload)
+
+
+def _policy_error(kind: str, rule: str) -> ToolError:
+    messages = {
+        "policy_denied": "tool is not declared in execution policy",
+        "approval_required": "tool cost is unknown and requires approval",
+        "budget_exceeded": "tool execution exceeds the run budget",
+        "duplicate_call": "tool action has already been claimed",
+    }
+    return ToolError(kind=kind, message=messages[kind], details={"rule": rule})
+
+
+__all__ = [
+    "BudgetLimits", "BudgetPolicy", "BudgetSnapshot", "PathPolicy",
+    "ToolBudgetRule", "ToolPathRule", "ToolPolicy",
+]

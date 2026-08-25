@@ -82,7 +82,7 @@ labelkit/
 ├── __init__.py                         # __version__ and TOOL_VERSION only
 ├── agent/
 │   ├── __init__.py                     # provider-neutral control-plane exports
-│   ├── policies.py                     # P2.3 execution-time path policy gate
+│   ├── policies.py                     # P2.3–P2.4 path/budget/duplicate gates
 │   └── tools/
 │       ├── __init__.py                 # tool-boundary exports
 │       ├── contracts.py                # P2.1 ToolSpec/Call/Error/Result data contracts
@@ -240,7 +240,7 @@ public runtime entry points and owns only parsing, user interaction, and the sol
 code mapping. Common depends on neither operators nor orchestration; operators never depend on
 orchestration; CLI never imports operators. `labelkit.agent` is a separate optional control
 plane above public orchestration/common surfaces, not a fifth stage/data-plane layer; the data
-plane never imports it. P2.1–P2.3 add control contracts, routing, and policy only and do not alter
+plane never imports it. P2.1–P2.4 add control contracts, routing, and policy only and do not alter
 the pipeline graph below.
 
 Pipeline order per batch — the three chain forms (process superset / generation re-flow /

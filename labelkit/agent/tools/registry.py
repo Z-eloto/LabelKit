@@ -89,6 +89,8 @@ class ToolRouter:
                  clock: Callable[[], float] = time.perf_counter) -> None:
         self._registry = registry
         self._policies = tuple(policies)
+        if any(getattr(policy, "terminal", False) for policy in self._policies[:-1]):
+            raise ValueError("a terminal policy must be last")
         self._clock = clock
 
     def route(self, call: ToolCall) -> ToolResult:
@@ -126,18 +128,18 @@ class ToolRouter:
                 return self._error(
                     call, started, "internal_error",
                     "tool policy returned an invalid call")
-            active_call = outcome
-
-        try:
-            arguments = _json_object_copy(active_call.arguments)
-        except Exception:
-            return self._error(
-                call, started, "internal_error",
-                "tool policy returned invalid arguments")
-        if _validation_details(item.arguments_validator, arguments) is not None:
-            return self._error(
-                call, started, "internal_error",
-                "tool policy violated the argument schema")
+            try:
+                arguments = _json_object_copy(outcome.arguments)
+            except Exception:
+                return self._error(
+                    call, started, "internal_error",
+                    "tool policy returned invalid arguments")
+            if _validation_details(item.arguments_validator, arguments) is not None:
+                return self._error(
+                    call, started, "internal_error",
+                    "tool policy violated the argument schema")
+            active_call = ToolCall(
+                call.call_id, call.tool, arguments, call.idempotency_key)
         try:
             raw_output = item.executor(arguments)
         except Exception as exc:

@@ -1168,3 +1168,20 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2261 passed、6 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P2.3 达到“路径逃逸、链接和敏感文件访问在执行前确定性拒绝，拒绝路径 executor 零调用”的验收条件；下一步执行 P2.4，实现预算与重复动作 Policy，冻结费用上限和幂等边界。
+
+### 2026-08-25：P2.4 预算与重复动作 Policy
+
+状态：**完成。**
+
+已完成：
+
+- 新增冻结的 `BudgetLimits`、`ToolBudgetRule` 与 `BudgetSnapshot`：使用精确 `Decimal` 管理 USD 费用，显式限制 tool call、pilot run、当前 iteration 和单调墙钟，并支持 `(0, 1]` 成本软阈值；
+- `ToolBudgetRule` 由代码拥有，可声明固定费用或按已校验 `ToolCall` 计算的动态估算，便于后续消费 dry-run 结果；未知费用返回 `approval_required`，不静默按零费用处理，也不信任 Planner 自报价格；
+- `BudgetPolicy` 定义为 Policy 链末端唯一有状态门；Router 拒绝把 terminal policy 放在其他 Policy 之前，并在每个 Policy 后重新执行 JSON 隔离与参数 Schema 校验，确保路径等无状态门先通过后才占用预算；
+- 预算、tool/pilot 计数、幂等键摘要与规范化动作摘要在同一把锁内原子检查和占用，并发调用不能重复执行或超支；只保留摘要，不保留原始幂等键和参数；相同 key 不同参数与相同动作不同 key 均返回 `duplicate_call`；
+- executor 异常和非法结果不会释放占用，避免不确定的付费请求被自动重放；`settle()` 可一次性用实际费用替换保守估算，实际为零可释放费用但不释放重复动作标记，实际超支会使后续派发 fail-closed；
+- `docs/dev/SPEC-agent-control-plane.md` 与 `docs/CONTRACTS.md` 已同步检查顺序、软/硬阈值、并发语义与残余边界：本批账本仍在内存，P3 负责 Controller iteration，P4 负责真实 provider 用量和 pilot 双预算，P5 负责持久化恢复与审批状态；
+- Agent 与冻结布局直接回归通过：177 passed、3 skipped；生产代码净增 235 行，位于 P2.4 的 100–250 行范围内；
+- 完整离线套件通过：2295 passed、6 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+
+判定：P2.4 达到“预算与重复动作在执行前确定性、并发安全地拒绝，失败调用不能重复收费”的验收条件；下一步执行 P2.5，建立只写独立目录且原子创建的 Agent workspace 生命周期。
