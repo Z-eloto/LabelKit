@@ -1185,3 +1185,21 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - 完整离线套件通过：2295 passed、6 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P2.4 达到“预算与重复动作在执行前确定性、并发安全地拒绝，失败调用不能重复收费”的验收条件；下一步执行 P2.5，建立只写独立目录且原子创建的 Agent workspace 生命周期。
+
+### 2026-08-25：P2.5 Agent workspace 生命周期
+
+状态：**完成。**
+
+已完成：
+
+- 新增冻结的 `AgentWorkspace` 与 `CandidateWorkspace`，workspace 输出根只能由 `project_root/out/agent/<agent_run_id>` 推导，调用方不能注入任意输出根；run/candidate ID 使用闭合格式，路径分隔符、点名称和遍历在任何写入前拒绝；
+- workspace 与 candidate 均采用“同父目录独占 claim → 隐藏随机 `.part` staging 完整初始化 → 所有权 marker flush+fsync → 最终目标二次不存在检查 → 单次目录 rename 发布”的协议；同一身份并发创建只有一个赢家，最终目录在结构完整前不可见；
+- 初始化、marker 写入或 rename 失败时只清理由当前调用创建且再次校验过的 staging/claim，不删除最终路径或无关隐藏目录；发布期间若外部进程抢占最终名称，也按 `WorkspaceExistsError` 拒绝且不覆盖对方内容；
+- 初始 run 目录只包含 `.workspace.json`、`source/`、`candidates/`；candidate 目录只包含 `.candidate.json` 与 `run/`。marker 冻结 schema/kind/run/candidate 身份，复用身份永不覆盖；
+- `open()` / `open_candidate()` 为纯只读校验，不创建缺失父目录，并拒绝缺失、超限、损坏、外来、结构不完整、符号链接或 Windows reparse point 路径；每个写方法都会重新验证所有权，伪造 dataclass 路径不能重定向写入；
+- `AgentWorkspace.root` 已与 P2.3 `PathPolicy` 做跨批次测试：当前 run 内写入获准，相邻 run 路径仍被 `write_scope` 拒绝；`.git/.ssh/.aws` project path 明确禁止；
+- `docs/dev/SPEC-agent-control-plane.md` 与 `docs/CONTRACTS.md` 已同步目录结构、原子可见性协议和残余边界：强杀进程仍可能遗留 claim/staging，本批不猜测其是否仍存活也不自动删除，P5 再结合持久化状态实现可证明的恢复；
+- Agent 与冻结布局直接回归通过：211 passed、5 skipped；本机新增 2 个 skip 均因 Windows 环境无创建符号链接权限；生产代码净增 277 行，位于 P2.5 的 120–280 行范围内；
+- 完整离线套件通过：2329 passed、8 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+
+判定：P2.5 达到“Agent 只写独立 run/candidate 目录，并发与失败路径不会发布半初始化或覆盖已有 workspace”的验收条件；下一步执行 P2.6，实现复用 P1 profile 的 `inspect_dataset` 只读工具。

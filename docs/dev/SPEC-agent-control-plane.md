@@ -162,8 +162,8 @@ broken policy never reaches the executor.
 
 - a base directory used to resolve relative arguments;
 - explicitly allowed read paths;
-- an optional single write root, intended to be `out/agent/<run_id>` once the
-  workspace lifecycle exists;
+- an optional single write root; when writes are allowed P2.5 requires it to be
+  the verified `AgentWorkspace.root` at `out/agent/<run_id>`;
 - one `ToolPathRule` for every registered tool, including an explicit empty rule
   for pathless tools.
 
@@ -242,3 +242,56 @@ restoration belongs to P5, Controller iteration ownership belongs to P3, and
 actual provider usage extraction plus dual pilot limits belong to P4. Approval of
 unknown costs is not implemented by returning `approval_required`; it remains a
 separate future state transition.
+
+## 10. P2.5 Agent Workspace Lifecycle
+
+`AgentWorkspace.create(project_root, agent_run_id)` derives its only shared parent
+as `<project_root>/out/agent` and publishes the run at
+`out/agent/<agent_run_id>`. Callers cannot supply an arbitrary output root. Run
+identities match `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`; candidate identities match
+`candidate-[0-9]{3,6}`. Traversal, separators, dot names, and unsupported names
+are rejected before any write. Project paths containing `.git`, `.ssh`, or `.aws`
+components are forbidden.
+
+Creation uses this visibility protocol for both runs and candidates:
+
+1. verify the canonical parent is a real directory with no symbolic-link or
+   Windows reparse-point component;
+2. exclusively create a same-parent hidden claim file;
+3. build all required directories and a bounded ownership marker in a random
+   same-parent `.part` directory;
+4. flush and `fsync` the marker;
+5. confirm the final identity is still absent and rename the completed directory
+   once into its final name;
+6. remove the claim; on failure, remove only the validated staging directory and
+   claim, never a caller-owned path.
+
+The claim makes publication single-winner across cooperating processes. The
+second final-name check prevents overwriting a target introduced while staging.
+The final workspace is invisible until its required layout is complete. This is
+an atomic visibility contract, not yet P5 crash durability: a process killed
+without running cleanup may leave a claim or staging directory, and this batch
+does not guess whether such a claim is live or delete it automatically.
+
+A run initially owns only:
+
+```text
+out/agent/<run_id>/
+  .workspace.json
+  source/
+  candidates/
+```
+
+`create_candidate(candidate_id)` atomically adds one directory containing
+`.candidate.json` and `run/`. The marker has exact `schema_version`, kind, run,
+and candidate identities. Reusing an identity never overwrites its directory.
+`open()` and `open_candidate()` are read-only: they do not create missing parents
+and reject missing, oversized, malformed, foreign, linked, or structurally
+incomplete workspaces. Public path records are frozen, and every mutating method
+revalidates ownership so altered records cannot redirect writes.
+
+P2.5 creates no goal, state, events, manifest, candidate configuration, or LabelKit
+output file. Their serialization and recovery belong to later batches. Like the
+path policy, this API is not an OS sandbox against a privileged process changing
+directories after validation; real tools must continue to use the owned canonical
+paths and the execution-time `PathPolicy`.

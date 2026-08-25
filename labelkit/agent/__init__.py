@@ -23,11 +23,19 @@ from labelkit.agent.policies import (
     ToolPathRule,
     ToolPolicy,
 )
+from labelkit.agent.workspace import (
+    AgentWorkspace,
+    CandidateWorkspace,
+    WorkspaceError,
+    WorkspaceExistsError,
+    WorkspaceIntegrityError,
+)
 
 __all__ = [
-    "BudgetLimits", "BudgetPolicy", "BudgetSnapshot", "JsonObject", "JsonValue",
-    "ToolCall", "ToolError", "ToolErrorKind", "PathPolicy", "ToolBudgetRule",
+    "AgentWorkspace", "BudgetLimits", "BudgetPolicy", "BudgetSnapshot",
+    "CandidateWorkspace", "JsonObject", "JsonValue", "ToolCall", "ToolError",
+    "ToolErrorKind", "PathPolicy", "ToolBudgetRule",
     "ToolExecutor", "ToolPathRule", "ToolPolicy",
     "ToolRegistry", "ToolResult", "ToolResultStatus", "ToolRiskLevel", "ToolRouter",
-    "ToolSpec",
+    "ToolSpec", "WorkspaceError", "WorkspaceExistsError", "WorkspaceIntegrityError",
 ]
