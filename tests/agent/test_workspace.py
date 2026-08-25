@@ -345,6 +345,21 @@ def test_linked_out_parent_is_rejected(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+def test_output_link_gate_runs_before_the_first_output_write(tmp_path, monkeypatch):
+    out = tmp_path / "out"
+    original = workspace_module._has_link_component
+
+    def report_link(path):
+        return path == out or original(path)
+
+    monkeypatch.setattr(workspace_module, "_has_link_component", report_link)
+
+    with pytest.raises(WorkspaceIntegrityError, match="output parent"):
+        AgentWorkspace.create(tmp_path, "run-001")
+
+    assert not out.exists()
+
+
 def test_linked_candidate_container_is_rejected(tmp_path):
     workspace = AgentWorkspace.create(tmp_path, "run-001")
     outside = tmp_path / "outside"

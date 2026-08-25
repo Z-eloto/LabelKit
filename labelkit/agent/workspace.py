@@ -127,10 +127,13 @@ def _agent_root(project_root: str | Path, *, create: bool) -> Path:
     if not project.is_dir():
         raise WorkspaceIntegrityError("project root is not a directory")
 
-    agent_root = project / "out" / "agent"
+    out_root = project / "out"
+    agent_root = out_root / "agent"
+    if create and _has_link_component(out_root):
+        raise WorkspaceIntegrityError("Agent output parent contains a linked component")
     if create:
         try:
-            (project / "out").mkdir(mode=0o700, exist_ok=True)
+            out_root.mkdir(mode=0o700, exist_ok=True)
             agent_root.mkdir(mode=0o700, exist_ok=True)
         except OSError as exc:
             raise WorkspaceError("cannot create the Agent workspace parent") from exc

@@ -1199,7 +1199,7 @@ Agent trace 默认只保存引用与摘要。若用户显式允许保存内容�
 - `open()` / `open_candidate()` 为纯只读校验，不创建缺失父目录，并拒绝缺失、超限、损坏、外来、结构不完整、符号链接或 Windows reparse point 路径；每个写方法都会重新验证所有权，伪造 dataclass 路径不能重定向写入；
 - `AgentWorkspace.root` 已与 P2.3 `PathPolicy` 做跨批次测试：当前 run 内写入获准，相邻 run 路径仍被 `write_scope` 拒绝；`.git/.ssh/.aws` project path 明确禁止；
 - `docs/dev/SPEC-agent-control-plane.md` 与 `docs/CONTRACTS.md` 已同步目录结构、原子可见性协议和残余边界：强杀进程仍可能遗留 claim/staging，本批不猜测其是否仍存活也不自动删除，P5 再结合持久化状态实现可证明的恢复；
-- Agent 与冻结布局直接回归通过：211 passed、5 skipped；本机新增 2 个 skip 均因 Windows 环境无创建符号链接权限；生产代码净增 277 行，位于 P2.5 的 120–280 行范围内；
-- 完整离线套件通过：2329 passed、8 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
+- Agent 与冻结布局直接回归通过：212 passed、5 skipped；本机新增 2 个 skip 均因 Windows 环境无创建符号链接权限；生产代码净增 280 行，位于 P2.5 的 120–280 行范围上限；
+- 完整离线套件通过：2330 passed、8 skipped、49 deselected；secret scan、生产模块 `compileall` 与 `git diff --check` 均通过。
 
 判定：P2.5 达到“Agent 只写独立 run/candidate 目录，并发与失败路径不会发布半初始化或覆盖已有 workspace”的验收条件；下一步执行 P2.6，实现复用 P1 profile 的 `inspect_dataset` 只读工具。
